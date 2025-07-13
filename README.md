@@ -475,7 +475,7 @@ uchinopower=# select * from cumlative_amount_epower ;
 (4 rows)
 
 uchinopower=# select * from instant_epower ;
-id | location |      recorded_at       | watt
+ id | location |      recorded_at       | watt
 ----+----------+------------------------+------
   1 |          | 2025-07-13 15:41:00+09 | 1432
   2 |          | 2025-07-13 15:42:00+09 | 1384
