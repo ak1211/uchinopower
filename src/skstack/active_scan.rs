@@ -34,11 +34,11 @@ pub fn active_scan(
         match skstack::receive(port_reader) {
             Ok(skstack::SkRxD::Ok) => {}
             Ok(fail @ skstack::SkRxD::Fail(_)) => {
-                log::debug!("{:?}", fail);
+                tracing::debug!("{:?}", fail);
                 break;
             }
             Ok(skstack::SkRxD::Event(event)) => {
-                log::debug!("{:?}", event);
+                tracing::debug!("{:?}", event);
                 match event.code {
                     0x20 => continue,    // EVENT 20 = beaconを受信した
                     0x22 => break 'exit, // EVENT 22 = アクティブスキャン終了
@@ -46,11 +46,11 @@ pub fn active_scan(
                 }
             }
             Ok(skstack::SkRxD::Epandesc(event)) => {
-                log::debug!("{:?}", event);
+                tracing::debug!("{:?}", event);
                 found.push(event);
             }
             Ok(skstack::SkRxD::Erxudp(event)) => {
-                log::debug!("{:?}", event);
+                tracing::debug!("{:?}", event);
             }
             Err(e) if e.kind() == io::ErrorKind::TimedOut => continue, // タイムアウトエラーは無視する
             Err(e) => return Err(e).context("read failed!"),

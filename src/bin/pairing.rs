@@ -4,13 +4,13 @@
 //
 use anyhow::{Context, anyhow};
 use clap::Parser;
-use env_logger;
 use serialport::{DataBits, SerialPort, StopBits};
 use sqlx::PgPool;
 use std::env;
 use std::io::BufReader;
 use std::str::FromStr;
 use std::time::Duration;
+use tracing_subscriber::FmtSubscriber;
 use uchinoepower::pairing;
 use uchinoepower::skstack::authn;
 
@@ -54,8 +54,13 @@ fn open_port(port_name: &str) -> anyhow::Result<Box<dyn SerialPort>> {
 async fn main() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
 
-    // デバッグレベルは RUST_LOG 環境変数で設定できる
-    env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(tracing::Level::TRACE)
+        .with_thread_names(true)
+        .with_thread_ids(true)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     // コマンドライン引数
     let cli = Cli::parse();

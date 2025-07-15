@@ -5,7 +5,6 @@
 use anyhow::{Context, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use core::time;
-use env_logger;
 use serialport::{DataBits, SerialPort, StopBits};
 use std::fs;
 use std::fs::File;
@@ -15,6 +14,7 @@ use std::str::FromStr;
 use std::sync::{LazyLock, mpsc, mpsc::TryRecvError};
 use std::thread;
 use std::time::Duration;
+use tracing_subscriber::FmtSubscriber;
 use uchinoepower::echonetlite::{
     self, EchonetliteEdata, EchonetliteFrame, smart_electric_energy_meter,
 };
@@ -187,7 +187,7 @@ fn exec_pairing(cli: &Cli, args: &PairingArgs) -> anyhow::Result<()> {
             match file.write_all([comment, toml].join("\n").as_bytes()) {
                 Ok(()) => Ok(println!("\"{}\" file write finished.", file_name)),
                 Err(e) => {
-                    log::error!("{:?}", e);
+                    tracing::error!("{:?}", e);
                     bail!(e);
                 }
             }
@@ -250,7 +250,7 @@ fn exec_dryrun(cli: &Cli) -> anyhow::Result<()> {
                     for v in frame.edata.iter() {
                         s.push(v.show(Some(&settings.Unit)));
                     }
-                    log::info!("{}", s.join(" "));
+                    tracing::info!("{}", s.join(" "));
                 }
             }
             Ok(())
@@ -302,16 +302,16 @@ fn exec_dryrun(cli: &Cli) -> anyhow::Result<()> {
 fn take_erxudp(serial_port_reader: &mut BufReader<dyn io::Read>) -> anyhow::Result<Option<Erxudp>> {
     match skstack::receive(serial_port_reader) {
         Ok(r @ skstack::SkRxD::Ok) => {
-            log::trace!("{:?}", r);
+            tracing::trace!("{:?}", r);
         }
         Ok(r @ skstack::SkRxD::Fail(_)) => {
-            log::trace!("{:?}", r);
+            tracing::trace!("{:?}", r);
         }
         Ok(r @ skstack::SkRxD::Event(_)) => {
-            log::trace!("{:?}", r);
+            tracing::trace!("{:?}", r);
         }
         Ok(r @ skstack::SkRxD::Epandesc(_)) => {
-            log::trace!("{:?}", r);
+            tracing::trace!("{:?}", r);
         }
         Ok(skstack::SkRxD::Erxudp(v)) => {
             return Ok(Some(v));
@@ -322,8 +322,13 @@ fn take_erxudp(serial_port_reader: &mut BufReader<dyn io::Read>) -> anyhow::Resu
     Ok(None)
 }
 fn main() -> anyhow::Result<()> {
-    // デバッグレベルは RUST_LOG 環境変数で設定できる
-    env_logger::init_from_env(env_logger::Env::new().default_filter_or("trace"));
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(tracing::Level::TRACE)
+        .with_thread_names(true)
+        .with_thread_ids(true)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let cli = Cli::parse();
 

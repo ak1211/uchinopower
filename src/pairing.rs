@@ -82,16 +82,16 @@ pub fn pairing(
             'exit: loop {
                 match skstack::receive(port_reader) {
                     Ok(r @ skstack::SkRxD::Ok) => {
-                        log::trace!("{:?}", r);
+                        tracing::trace!("{:?}", r);
                     }
                     Ok(r @ skstack::SkRxD::Fail(_)) => {
-                        log::trace!("{:?}", r);
+                        tracing::trace!("{:?}", r);
                     }
                     Ok(r @ skstack::SkRxD::Event(_)) => {
-                        log::trace!("{:?}", r);
+                        tracing::trace!("{:?}", r);
                     }
                     Ok(r @ skstack::SkRxD::Epandesc(_)) => {
-                        log::trace!("{:?}", r);
+                        tracing::trace!("{:?}", r);
                     }
                     Ok(skstack::SkRxD::Erxudp(erxudp)) => {
                         let config = bincode::config::standard()
@@ -105,7 +105,7 @@ pub fn pairing(
                         for v in frame.edata.iter() {
                             s.push(format!("{}", v));
                         }
-                        log::info!("{}", s.join(" "));
+                        tracing::info!("{}", s.join(" "));
                         // 積算電力量単位値を取り出す
                         for edata in frame.edata {
                             match SM::Properties::try_from(edata) {

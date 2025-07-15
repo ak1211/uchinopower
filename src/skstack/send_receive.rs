@@ -18,7 +18,7 @@ pub fn send(w: &mut dyn io::Write, command: &[u8]) -> io::Result<()> {
         .map(|n| *n as char)
         .filter(|n| n.is_ascii())
         .collect::<String>();
-    log::trace!(target:"Tx->","{}", s.escape_debug());
+    tracing::trace!(target:"Tx->","{}", s.escape_debug());
     w.write_all(command)
 }
 
@@ -28,12 +28,12 @@ pub fn receive(r: &mut BufReader<dyn io::Read>) -> io::Result<SkRxD> {
     loop {
         let mut line = String::new();
         let _ = r.read_line(&mut line)?;
-        log::trace!(target:"<-Rx","{}", line.escape_debug());
+        tracing::trace!(target:"<-Rx","{}", line.escape_debug());
         linebuf.push(line);
         match parser::parse_rxd(linebuf.concat().as_ref()) {
             Ok((_s, r)) => return Ok(r),
             Err(nom::Err::Incomplete(_)) => continue, // つづけて次行を読み込む
-            Err(e) => log::trace!(target:"parser","{:?}", e),
+            Err(e) => tracing::trace!(target:"parser","{:?}", e),
         }
         linebuf.clear();
     }

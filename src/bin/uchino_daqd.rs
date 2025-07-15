@@ -7,18 +7,18 @@ use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};
 use chrono_tz::Asia;
 use cron::Schedule;
 use daemonize::Daemonize;
-use env_logger;
 use rust_decimal::Decimal;
 use serialport::{DataBits, SerialPort, StopBits};
 use sqlx::{self, postgres::PgPool};
 use std::env;
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{self, BufReader};
 use std::net::Ipv6Addr;
 use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::Duration;
 use tokio;
+use tracing_subscriber::FmtSubscriber;
 use uchinoepower::connection_settings::ConnectionSettings;
 use uchinoepower::echonetlite::{
     EchonetliteEdata, EchonetliteFrame, smart_electric_energy_meter as SM,
@@ -117,12 +117,12 @@ async fn exec_data_acquisition(port_name: &str, pool: &PgPool) -> anyhow::Result
             // イベント受信用スレッド
             rx_result = smartmeter_receiver(&pool, &mut serial_port_reader, &settings.Unit) => {
                 // スレッドは無限ループなのでここでは必ずエラー
-                log::error!("rx_result:{:?}", rx_result);
+                tracing::error!("rx_result:{:?}", rx_result);
             },
             // イベント送信用スレッド
             tx_result = smartmeter_transmitter(&mut serial_port, &sender) => {
                 // スレッドは無限ループなのでここでは必ずエラー
-                log::error!("tx_result:{:?}", tx_result);
+                tracing::error!("tx_result:{:?}", tx_result);
             }
         }
     }
@@ -132,16 +132,16 @@ async fn exec_data_acquisition(port_name: &str, pool: &PgPool) -> anyhow::Result
 fn rx_erxudp(serial_port_reader: &mut BufReader<dyn io::Read>) -> anyhow::Result<Option<Erxudp>> {
     match skstack::receive(serial_port_reader) {
         Ok(r @ skstack::SkRxD::Ok) => {
-            log::trace!("{:?}", r);
+            tracing::trace!("{:?}", r);
         }
         Ok(r @ skstack::SkRxD::Fail(_)) => {
-            log::trace!("{:?}", r);
+            tracing::trace!("{:?}", r);
         }
         Ok(r @ skstack::SkRxD::Event(_)) => {
-            log::trace!("{:?}", r);
+            tracing::trace!("{:?}", r);
         }
         Ok(r @ skstack::SkRxD::Epandesc(_)) => {
-            log::trace!("{:?}", r);
+            tracing::trace!("{:?}", r);
         }
         Ok(skstack::SkRxD::Erxudp(v)) => {
             return Ok(Some(v));
@@ -192,7 +192,7 @@ async fn smartmeter_receiver(
                                 if let Err(e) =
                                     commit_instant_epower(&pool, &recorded_at, &epower).await
                                 {
-                                    log::error!("{}", e);
+                                    tracing::error!("{}", e);
                                 }
                             }
                             // 0xe8 瞬時電流計測値
@@ -200,7 +200,7 @@ async fn smartmeter_receiver(
                                 if let Err(e) =
                                     commit_instant_current(&pool, &recorded_at, &current).await
                                 {
-                                    log::error!("{}", e);
+                                    tracing::error!("{}", e);
                                 }
                             }
                             // 0xea 定時積算電力量計測値(正方向計測値)
@@ -208,12 +208,12 @@ async fn smartmeter_receiver(
                                 if let Err(e) =
                                     commit_cumlative_amount_epower(&pool, unit, &epower).await
                                 {
-                                    log::error!("{}", e);
+                                    tracing::error!("{}", e);
                                 }
                             }
                             //
                             _ => {
-                                log::trace!(
+                                tracing::trace!(
                                     "Unhandled ESV {}, EPC {} {:?}",
                                     frame.esv,
                                     v.epc,
@@ -232,12 +232,12 @@ async fn smartmeter_receiver(
                                 if let Err(e) =
                                     commit_cumlative_amount_epower(&pool, unit, &epower).await
                                 {
-                                    log::error!("{}", e);
+                                    tracing::error!("{}", e);
                                 }
                             }
                             //
                             _ => {
-                                log::trace!(
+                                tracing::trace!(
                                     "Unhandled ESV {}, EPC {} {:?}",
                                     frame.esv,
                                     v.epc,
@@ -248,14 +248,14 @@ async fn smartmeter_receiver(
                     }
                 }
                 //
-                esv => log::trace!("Unhandled ESV:{esv}"),
+                esv => tracing::trace!("Unhandled ESV:{esv}"),
             }
             let mut s = Vec::<String>::new();
             s.push(frame.show());
             for v in frame.edata.iter() {
                 s.push(v.show(Some(unit)));
             }
-            log::info!("{}", s.join(" "));
+            tracing::info!("{}", s.join(" "));
         }
         // 制御を他のタスクに譲る
         tokio::task::yield_now().await;
@@ -275,7 +275,7 @@ async fn smartmeter_transmitter<T: io::Write + Send>(
     for next in schedule.upcoming(Asia::Tokyo) {
         // 次回実行予定時刻まで待つ
         let duration = (next.to_utc() - Utc::now()).to_std()?;
-        log::trace!("Next scheduled time. ({}), sleep ({:?})", next, duration);
+        tracing::trace!("Next scheduled time. ({}), sleep ({:?})", next, duration);
         tokio::time::sleep(duration).await;
         // メッセージ送信(瞬時電力と瞬時電流計測値)
         skstack::send_echonetlite(serial_port, &sender, &INSTANT_WATT_AMPERE)?;
@@ -384,15 +384,31 @@ RETURNING id
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    // デバッグレベルは RUST_LOG 環境変数で設定できる
-    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(tracing::Level::TRACE)
+        .with_thread_names(true)
+        .with_thread_ids(true)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     // 環境変数
     let serial_device = env::var("SERIAL_DEVICE").context("Must be set to SERIAL_DEVICE")?;
     let database_url = env::var("DATABASE_URL").context("Must be set to DATABASE_URL")?;
 
-    let stdout = File::create("/var/run/uchino_daqd.out").context("stdout file create error")?;
-    let stderr = File::create("/var/run/uchino_daqd.err").context("stderr file create error")?;
+    let stdout = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .append(true)
+        .open("/run/uchino_daqd.out")
+        .context("stdout file create error")?;
+
+    let stderr = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .append(true)
+        .open("/run/uchino_daqd.err")
+        .context("stderr file create error")?;
 
     let daemonize = Daemonize::new()
         .pid_file("/run/uchino_daqd.pid")
@@ -406,12 +422,10 @@ async fn main() -> anyhow::Result<()> {
         Ok(_) => {
             let pool = PgPool::connect(&database_url).await?;
             if let Err(e) = exec_data_acquisition(&serial_device, &pool).await {
-                log::error!("{}", e);
+                tracing::error!("{}", e);
             }
         }
-        Err(e) => {
-            log::error!("{}", e);
-        }
+        Err(e) => tracing::error!("{}", e),
     }
     Ok(())
 }
