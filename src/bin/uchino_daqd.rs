@@ -75,8 +75,11 @@ static INSTANT_WATT_AMPERE: LazyLock<EchonetliteFrame> = LazyLock::new(|| {
     }
 });
 
+#[tracing::instrument]
 /// スマートメーターからデーターを収集する
-async fn exec_data_acquisition(port_name: &str, pool: &PgPool) -> anyhow::Result<()> {
+async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::Result<()> {
+    let pool = PgPool::connect(database_url).await?;
+
     // データベースからスマートメーターの情報を得る
     let settings = read_settings(&pool).await?;
     let credentials = authn::Credentials {
@@ -137,6 +140,17 @@ fn rx_erxudp(serial_port_reader: &mut BufReader<dyn io::Read>) -> anyhow::Result
         Ok(r @ skstack::SkRxD::Fail(_)) => {
             tracing::trace!("{:?}", r);
         }
+        Ok(skstack::SkRxD::Event(ev)) if ev.code == 0x1f => {
+            tracing::trace!("直後に EEDSCAN イベントが発生します。");
+        }
+        Ok(skstack::SkRxD::Event(ev)) if ev.code == 0x20 => {
+            tracing::trace!("直後に EPANDESC イベントが発生します。");
+        }
+        Ok(skstack::SkRxD::Event(ev)) if ev.code == 0x21 => match ev.param {
+            Some(0) => tracing::trace!("UDP の送信に成功"),
+            Some(1) => tracing::trace!("UDP の送信に失敗"),
+            _ => tracing::trace!("{:?}", skstack::SkRxD::Event(ev)),
+        },
         Ok(r @ skstack::SkRxD::Event(_)) => {
             tracing::trace!("{:?}", r);
         }
@@ -420,8 +434,7 @@ async fn main() -> anyhow::Result<()> {
 
     match daemonize.start() {
         Ok(_) => {
-            let pool = PgPool::connect(&database_url).await?;
-            if let Err(e) = exec_data_acquisition(&serial_device, &pool).await {
+            if let Err(e) = exec_data_acquisition(&serial_device, &database_url).await {
                 tracing::error!("{}", e);
             }
         }
