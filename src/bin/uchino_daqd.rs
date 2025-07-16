@@ -397,14 +397,14 @@ async fn main() -> anyhow::Result<()> {
     let database_url = env::var("DATABASE_URL").context("Must be set to DATABASE_URL")?;
 
     let stdout = OpenOptions::new()
-        .create_new(true)
+        .create(true)
         .write(true)
         .append(true)
         .open("/run/uchino_daqd.out")
         .context("stdout file create error")?;
 
     let stderr = OpenOptions::new()
-        .create_new(true)
+        .create(true)
         .write(true)
         .append(true)
         .open("/run/uchino_daqd.err")
