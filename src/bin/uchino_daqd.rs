@@ -3,10 +3,7 @@
 // SPDX-FileCopyrightText: 2025 Akihiro Yamamoto <github.com/ak1211>
 //
 use anyhow::{Context, anyhow};
-use chrono::{
-    DateTime, Datelike, Days, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Timelike,
-    Utc,
-};
+use chrono::{DateTime, Datelike, Days, TimeDelta, TimeZone, Timelike, Utc};
 use chrono_tz::Asia;
 use cron::Schedule;
 use daemonize::Daemonize;
@@ -217,13 +214,8 @@ async fn smartmeter_receiver(
                         match SM::Properties::try_from(v.clone()) {
                             // 0xe2 積算電力量計測値履歴1 (正方向計測値)
                             Ok(SM::Properties::HistoricalCumlativeAmount(hist)) => {
-                                if let Err(e) = commit_historical_cumlative_amount(
-                                    &pool,
-                                    &recorded_at.date_naive(),
-                                    unit,
-                                    &hist,
-                                )
-                                .await
+                                if let Err(e) =
+                                    commit_historical_cumlative_amount(&pool, unit, &hist).await
                                 {
                                     tracing::error!("{}", e);
                                 }
@@ -427,16 +419,20 @@ RETURNING id
 /// 今日の積算電力量履歴をデーターベースに蓄積する
 async fn commit_historical_cumlative_amount(
     pool: &PgPool,
-    today: &NaiveDate,
     unit: &SM::UnitForCumlativeAmountsPower,
     hist: &SM::HistoricalCumlativeAmount,
 ) -> anyhow::Result<()> {
-    let day = today
+    let jst_now = Utc::now().with_timezone(&Asia::Tokyo);
+    let jst_today = Asia::Tokyo
+        .with_ymd_and_hms(jst_now.year(), jst_now.month(), jst_now.day(), 0, 0, 0)
+        .single()
+        .unwrap();
+    let day = jst_today
         .checked_sub_days(Days::new(hist.n_days_ago as u64))
         .with_context(|| format!("n_days_ago:{}", hist.n_days_ago))?;
-    let halfhour = TimeDelta::new(30, 0).unwrap();
+    let halfhour = TimeDelta::new(30 * 60, 0).unwrap();
     //
-    let mut accumulator = day.and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+    let mut accumulator = day;
     let timeserial = std::iter::from_fn(move || {
         let ret = Some(accumulator);
         accumulator = accumulator.checked_add_signed(halfhour).unwrap();
@@ -447,17 +443,17 @@ async fn commit_historical_cumlative_amount(
         .historical
         .iter()
         .zip(timeserial)
-        .map(|(opt_val, datetime)| -> Option<(NaiveDateTime, Decimal)> {
+        .map(|(opt_val, datetime)| -> Option<(DateTime<Utc>, Decimal)> {
             match opt_val {
                 Some(val) => {
                     let kwh = Decimal::from(*val) * unit.0;
-                    Some((datetime, kwh))
+                    Some((datetime.with_timezone(&Utc), kwh))
                 }
                 None => None,
             }
         })
         .flatten()
-        .collect::<Vec<(NaiveDateTime, Decimal)>>();
+        .collect::<Vec<(DateTime<Utc>, Decimal)>>();
     //
     let mut query_builder =
         QueryBuilder::new("INSERT INTO cumlative_amount_epower ( recorded_at, kwh ) ");
