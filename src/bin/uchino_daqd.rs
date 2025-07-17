@@ -3,13 +3,16 @@
 // SPDX-FileCopyrightText: 2025 Akihiro Yamamoto <github.com/ak1211>
 //
 use anyhow::{Context, anyhow};
-use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};
+use chrono::{
+    DateTime, Datelike, Days, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Timelike,
+    Utc,
+};
 use chrono_tz::Asia;
 use cron::Schedule;
 use daemonize::Daemonize;
 use rust_decimal::Decimal;
 use serialport::{DataBits, SerialPort, StopBits};
-use sqlx::{self, postgres::PgPool};
+use sqlx::{self, QueryBuilder, postgres::PgPool};
 use std::env;
 use std::fs::OpenOptions;
 use std::io::{self, BufReader};
@@ -37,8 +40,8 @@ fn open_port(port_name: &str) -> anyhow::Result<Box<dyn SerialPort>> {
         .with_context(move || format!("Failed to open \"{}\".", port_name))
 }
 
-/// 定時積算電力量計測値を取得するechonet lite電文
-static LATEST_CWH: LazyLock<EchonetliteFrame> = LazyLock::new(|| {
+/// 今日の積算電力量履歴を取得するechonet lite電文
+static TODAY_CWH: LazyLock<EchonetliteFrame> = LazyLock::new(|| {
     EchonetliteFrame {
         ehd: 0x1081,              // 0x1081 = echonet lite
         tid: 1,                   // tid
@@ -47,8 +50,9 @@ static LATEST_CWH: LazyLock<EchonetliteFrame> = LazyLock::new(|| {
         esv: 0x62,                // get要求
         opc: 1,                   // 1つ
         edata: vec![EchonetliteEdata {
-            epc: 0xea, // 定時積算電力量計測値(正方向計測値)
-            ..Default::default()
+            epc: 0xe2, // 積算電力量計測値履歴1
+            pdc: 0,    // 今日
+            edt: &[],
         }],
     }
 });
@@ -75,7 +79,7 @@ static INSTANT_WATT_AMPERE: LazyLock<EchonetliteFrame> = LazyLock::new(|| {
     }
 });
 
-#[tracing::instrument]
+#[tracing::instrument(skip(database_url))]
 /// スマートメーターからデーターを収集する
 async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::Result<()> {
     let pool = PgPool::connect(database_url).await?;
@@ -105,17 +109,16 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
         .and_then(|cloned| Ok(BufReader::new(cloned)))
         .context("Failed to clone")?;
 
-    // スマートメーターと接続する
-    authn::connect(
-        &mut serial_port_reader,
-        &mut serial_port,
-        &credentials,
-        &sender,
-        settings.Channel,
-        settings.PanId,
-    )?;
-
     loop {
+        // スマートメーターと接続する
+        authn::connect(
+            &mut serial_port_reader,
+            &mut serial_port,
+            &credentials,
+            &sender,
+            settings.Channel,
+            settings.PanId,
+        )?;
         tokio::select! {
             // イベント受信用スレッド
             rx_result = smartmeter_receiver(&pool, &mut serial_port_reader, &settings.Unit) => {
@@ -140,20 +143,30 @@ fn rx_erxudp(serial_port_reader: &mut BufReader<dyn io::Read>) -> anyhow::Result
         Ok(r @ skstack::SkRxD::Fail(_)) => {
             tracing::trace!("{:?}", r);
         }
-        Ok(skstack::SkRxD::Event(ev)) if ev.code == 0x1f => {
-            tracing::trace!("直後に EEDSCAN イベントが発生します。");
-        }
-        Ok(skstack::SkRxD::Event(ev)) if ev.code == 0x20 => {
-            tracing::trace!("直後に EPANDESC イベントが発生します。");
-        }
-        Ok(skstack::SkRxD::Event(ev)) if ev.code == 0x21 => match ev.param {
-            Some(0) => tracing::trace!("UDP の送信に成功"),
-            Some(1) => tracing::trace!("UDP の送信に失敗"),
-            _ => tracing::trace!("{:?}", skstack::SkRxD::Event(ev)),
+        Ok(skstack::SkRxD::Event(ev)) => match ev.code {
+            0x01 => tracing::trace!("NS を受信した"),
+            0x02 => tracing::trace!("NA を受信した"),
+            0x05 => tracing::trace!("Echo Request を受信した"),
+            0x1f => tracing::trace!("ED スキャンが完了した"),
+            0x20 => tracing::trace!("Beacon を受信した"),
+            0x21 if Some(0) == ev.param => tracing::trace!("UDP の送信に成功"),
+            0x21 if Some(1) == ev.param => tracing::trace!("UDP の送信に失敗"),
+            0x22 => tracing::trace!("アクティブスキャンが完了した"),
+            0x24 => {
+                tracing::trace!("PANA による接続過程でエラーが発生した（接続が完了しなかった）")
+            }
+            0x25 => tracing::trace!("PANA による接続が完了した"),
+            0x26 => tracing::trace!("接続相手からセッション終了要求を受信した"),
+            0x27 => tracing::trace!("PANA セッションの終了に成功した"),
+            0x28 => tracing::trace!(
+                "PANA セッションの終了要求に対する応答がなくタイムアウトした（セ
+ッションは終了）"
+            ),
+            0x29 => tracing::trace!("セッションのライフタイムが経過して期限切れになった"),
+            0x32 => tracing::trace!("ARIB108 の送信総和時間の制限が発動した"),
+            0x33 => tracing::trace!("送信総和時間の制限が解除された"),
+            _ => tracing::trace!("{:?}", ev),
         },
-        Ok(r @ skstack::SkRxD::Event(_)) => {
-            tracing::trace!("{:?}", r);
-        }
         Ok(r @ skstack::SkRxD::Epandesc(_)) => {
             tracing::trace!("{:?}", r);
         }
@@ -166,6 +179,7 @@ fn rx_erxudp(serial_port_reader: &mut BufReader<dyn io::Read>) -> anyhow::Result
     Ok(None)
 }
 
+#[tracing::instrument(skip(pool, serial_port_reader))]
 /// 受信
 async fn smartmeter_receiver(
     pool: &PgPool,
@@ -201,6 +215,19 @@ async fn smartmeter_receiver(
                 0x72 => {
                     for v in frame.edata.iter() {
                         match SM::Properties::try_from(v.clone()) {
+                            // 0xe2 積算電力量計測値履歴1 (正方向計測値)
+                            Ok(SM::Properties::HistoricalCumlativeAmount(hist)) => {
+                                if let Err(e) = commit_historical_cumlative_amount(
+                                    &pool,
+                                    &recorded_at.date_naive(),
+                                    unit,
+                                    &hist,
+                                )
+                                .await
+                                {
+                                    tracing::error!("{}", e);
+                                }
+                            }
                             // 0xe7 瞬時電力計測値
                             Ok(SM::Properties::InstantiousPower(epower)) => {
                                 if let Err(e) =
@@ -276,13 +303,14 @@ async fn smartmeter_receiver(
     }
 }
 
+#[tracing::instrument(skip(serial_port))]
 /// 送信
 async fn smartmeter_transmitter<T: io::Write + Send>(
     serial_port: &mut T,
     sender: &Ipv6Addr,
 ) -> anyhow::Result<()> {
-    // メッセージ送信(定時積算電力量計測値)
-    skstack::send_echonetlite(serial_port, &sender, &LATEST_CWH)?;
+    // メッセージ送信(今日の積算電力量履歴)
+    skstack::send_echonetlite(serial_port, &sender, &TODAY_CWH)?;
 
     // スケジュールに則りメッセージ送信
     let schedule = Schedule::from_str("00 */1 * * * *")?;
@@ -396,12 +424,61 @@ RETURNING id
     Ok(rec.id)
 }
 
+/// 今日の積算電力量履歴をデーターベースに蓄積する
+async fn commit_historical_cumlative_amount(
+    pool: &PgPool,
+    today: &NaiveDate,
+    unit: &SM::UnitForCumlativeAmountsPower,
+    hist: &SM::HistoricalCumlativeAmount,
+) -> anyhow::Result<()> {
+    let day = today
+        .checked_sub_days(Days::new(hist.n_days_ago as u64))
+        .with_context(|| format!("n_days_ago:{}", hist.n_days_ago))?;
+    let halfhour = TimeDelta::new(30, 0).unwrap();
+    //
+    let mut accumulator = day.and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+    let timeserial = std::iter::from_fn(move || {
+        let ret = Some(accumulator);
+        accumulator = accumulator.checked_add_signed(halfhour).unwrap();
+        ret
+    });
+    //
+    let histrical_kwh = hist
+        .historical
+        .iter()
+        .zip(timeserial)
+        .map(|(opt_val, datetime)| -> Option<(NaiveDateTime, Decimal)> {
+            match opt_val {
+                Some(val) => {
+                    let kwh = Decimal::from(*val) * unit.0;
+                    Some((datetime, kwh))
+                }
+                None => None,
+            }
+        })
+        .flatten()
+        .collect::<Vec<(NaiveDateTime, Decimal)>>();
+    //
+    let mut query_builder =
+        QueryBuilder::new("INSERT INTO cumlative_amount_epower ( recorded_at, kwh ) ");
+
+    query_builder.push_values(histrical_kwh, |mut b, value| {
+        b.push_bind(value.0).push_bind(value.1);
+    });
+
+    let query = query_builder.build();
+    query.execute(pool).await?;
+
+    Ok(())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(tracing::Level::TRACE)
         .with_thread_names(true)
         .with_thread_ids(true)
+        .with_ansi(true)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
