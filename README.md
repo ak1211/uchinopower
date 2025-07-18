@@ -107,7 +107,7 @@ $ ./dryrun dry-run
 ```
 sudo apt update
 
-sudo apt install postgres
+sudo apt install postgresql
 ```
 
 ### postgres ユーザーのパスワードを設定する
