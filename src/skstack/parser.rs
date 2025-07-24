@@ -160,22 +160,27 @@ fn rx_epandesc(s: &str) -> nom::IResult<&str, SkRxD> {
 pub fn parse_rxd(input: &str) -> nom::IResult<&str, SkRxD> {
     alt((
         // 以下のどれか
-        rx_ok,       // OK
-        rx_fail,     // FAIL
-        rx_event,    // EVENT
-        rx_epandesc, // EPANDESC
-        rx_erxudp,   // ERXUDP
+        map((space0, crlf), |_| SkRxD::Void), // 空行
+        rx_ok,                                // OK
+        rx_fail,                              // FAIL
+        rx_event,                             // EVENT
+        rx_epandesc,                          // EPANDESC
+        rx_erxudp,                            // ERXUDP
     ))
     .parse(input)
 }
 
 #[test]
 fn test1() {
-    assert_eq!(u64_hex_digit("FF00").unwrap(), ("", 0xff00));
+    assert_eq!(parse_rxd("\r\n").unwrap(), ("", SkRxD::Void));
+
+    assert_eq!(parse_rxd(" \r\n").unwrap(), ("", SkRxD::Void));
 
     assert_eq!(parse_rxd("OK\r\n").unwrap(), ("", SkRxD::Ok));
 
     assert_eq!(parse_rxd("FAIL ER10\r\n").unwrap(), ("", SkRxD::Fail(16)));
+
+    assert_eq!(u64_hex_digit("FF00").unwrap(), ("", 0xff00));
 }
 
 #[test]

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 // SPDX-FileCopyrightText: 2025 Akihiro Yamamoto <github.com/ak1211>
 //
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Datelike, Days, TimeDelta, TimeZone, Timelike, Utc};
 use chrono_tz::Asia;
 use cron::Schedule;
@@ -11,13 +11,14 @@ use rust_decimal::Decimal;
 use serialport::{DataBits, SerialPort, StopBits};
 use sqlx::{self, QueryBuilder, postgres::PgPool};
 use std::env;
-use std::fs::OpenOptions;
+use std::fs::File;
 use std::io::{self, BufReader};
 use std::net::Ipv6Addr;
 use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::Duration;
 use tokio;
+use tracing_appender;
 use tracing_subscriber::FmtSubscriber;
 use uchinoepower::connection_settings::ConnectionSettings;
 use uchinoepower::echonetlite::{
@@ -76,7 +77,6 @@ static INSTANT_WATT_AMPERE: LazyLock<EchonetliteFrame> = LazyLock::new(|| {
     }
 });
 
-#[tracing::instrument(skip(database_url))]
 /// スマートメーターからデーターを収集する
 async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::Result<()> {
     let pool = PgPool::connect(database_url).await?;
@@ -118,188 +118,191 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
         )?;
         tokio::select! {
             // イベント受信用スレッド
-            rx_result = smartmeter_receiver(&pool, &mut serial_port_reader, &settings.Unit) => {
+            rx_result = smartmeter_receiver(&pool, &settings.Unit, &mut serial_port_reader) => {
                 // スレッドは無限ループなのでここでは必ずエラー
                 tracing::error!("rx_result:{:?}", rx_result);
             },
             // イベント送信用スレッド
-            tx_result = smartmeter_transmitter(&mut serial_port, &sender) => {
+            tx_result = smartmeter_transmitter(&sender, &mut serial_port) => {
                 // スレッドは無限ループなのでここでは必ずエラー
                 tracing::error!("tx_result:{:?}", tx_result);
             }
         }
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
+}
+
+/// スマートメーターから受信
+async fn receive_from_smartmeter<'a>(
+    pool: &PgPool,
+    unit: &SM::UnitForCumlativeAmountsPower,
+    recorded_at: DateTime<Utc>,
+    frame: &EchonetliteFrame<'a>,
+) -> anyhow::Result<()> {
+    match frame.esv {
+        // Get_res プロパティ値読み出し応答
+        0x72 => {
+            for v in frame.edata.iter() {
+                match SM::Properties::try_from(v.clone()) {
+                    // 0xe2 積算電力量計測値履歴1 (正方向計測値)
+                    Ok(SM::Properties::HistoricalCumlativeAmount(hist)) => {
+                        let _ = commit_historical_cumlative_amount(&pool, unit, &hist).await?;
+                    }
+                    // 0xe7 瞬時電力計測値
+                    Ok(SM::Properties::InstantiousPower(epower)) => {
+                        let _ = commit_instant_epower(&pool, &recorded_at, &epower).await?;
+                    }
+                    // 0xe8 瞬時電流計測値
+                    Ok(SM::Properties::InstantiousCurrent(current)) => {
+                        let _ = commit_instant_current(&pool, &recorded_at, &current).await?;
+                    }
+                    // 0xea 定時積算電力量計測値(正方向計測値)
+                    Ok(SM::Properties::CumlativeAmountsOfPowerAtFixedTime(epower)) => {
+                        let _ = commit_cumlative_amount_epower(&pool, unit, &epower).await?;
+                    }
+                    //
+                    _ => {
+                        tracing::trace!(
+                            "Unhandled ESV 0x{:X}, EPC 0x{:X} {:?}",
+                            frame.esv,
+                            v.epc,
+                            v.show(Some(unit))
+                        );
+                    }
+                }
+            }
+        }
+        // INF プロパティ値通知
+        0x73 => {
+            for v in frame.edata.iter() {
+                match SM::Properties::try_from(v.clone()) {
+                    // 0xea 定時積算電力量計測値(正方向計測値)
+                    Ok(SM::Properties::CumlativeAmountsOfPowerAtFixedTime(epower)) => {
+                        let _ = commit_cumlative_amount_epower(&pool, unit, &epower).await?;
+                    }
+                    //
+                    _ => {
+                        tracing::trace!(
+                            "Unhandled ESV 0x{:X}, EPC 0x{:X} {:?}",
+                            frame.esv,
+                            v.epc,
+                            v.show(Some(unit))
+                        );
+                    }
+                }
+            }
+        }
+        //
+        unhandled_esv => tracing::trace!("Unhandled ESV 0x{:X}", unhandled_esv),
+    }
+    let mut s = Vec::<String>::new();
+    s.push(frame.show());
+    for v in frame.edata.iter() {
+        s.push(v.show(Some(unit)));
+    }
+    tracing::info!("{}", s.join(" "));
+    Ok(())
 }
 
 /// ERXUDPイベント受信
-fn rx_erxudp(serial_port_reader: &mut BufReader<dyn io::Read>) -> anyhow::Result<Option<Erxudp>> {
-    match skstack::receive(serial_port_reader) {
-        Ok(r @ skstack::SkRxD::Ok) => {
-            tracing::trace!("{:?}", r);
-        }
-        Ok(r @ skstack::SkRxD::Fail(_)) => {
-            tracing::trace!("{:?}", r);
-        }
-        Ok(skstack::SkRxD::Event(ev)) => match ev.code {
-            0x01 => tracing::trace!("NS を受信した"),
-            0x02 => tracing::trace!("NA を受信した"),
-            0x05 => tracing::trace!("Echo Request を受信した"),
-            0x1f => tracing::trace!("ED スキャンが完了した"),
-            0x20 => tracing::trace!("Beacon を受信した"),
-            0x21 if Some(0) == ev.param => tracing::trace!("UDP の送信に成功"),
-            0x21 if Some(1) == ev.param => tracing::trace!("UDP の送信に失敗"),
-            0x22 => tracing::trace!("アクティブスキャンが完了した"),
-            0x24 => {
-                tracing::trace!("PANA による接続過程でエラーが発生した（接続が完了しなかった）")
-            }
-            0x25 => tracing::trace!("PANA による接続が完了した"),
-            0x26 => tracing::trace!("接続相手からセッション終了要求を受信した"),
-            0x27 => tracing::trace!("PANA セッションの終了に成功した"),
-            0x28 => tracing::trace!(
-                "PANA セッションの終了要求に対する応答がなくタイムアウトした（セ
-ッションは終了）"
-            ),
-            0x29 => tracing::trace!("セッションのライフタイムが経過して期限切れになった"),
-            0x32 => tracing::trace!("ARIB108 の送信総和時間の制限が発動した"),
-            0x33 => tracing::trace!("送信総和時間の制限が解除された"),
-            _ => tracing::trace!("{:?}", ev),
-        },
-        Ok(r @ skstack::SkRxD::Epandesc(_)) => {
-            tracing::trace!("{:?}", r);
-        }
-        Ok(skstack::SkRxD::Erxudp(v)) => {
-            return Ok(Some(v));
-        }
-        Err(e) if e.kind() == io::ErrorKind::TimedOut => {} // タイムアウトエラーは無視する
-        Err(e) => return Err(e).context("serial port read failed!"),
+async fn rx_erxudp(
+    pool: &PgPool,
+    unit: &SM::UnitForCumlativeAmountsPower,
+    erxudp: Erxudp,
+) -> anyhow::Result<()> {
+    // 受信時刻(分単位)
+    let recorded_at = {
+        let jst = Utc::now().with_timezone(&Asia::Tokyo);
+        let modified = Asia::Tokyo
+            .with_ymd_and_hms(
+                jst.year(),
+                jst.month(),
+                jst.day(),
+                jst.hour(),
+                jst.minute(),
+                0,
+            )
+            .single()
+            .unwrap();
+        modified.with_timezone(&Utc)
+    };
+    // ERXUDPメッセージからEchonetliteフレームを取り出す。
+    let config = bincode::config::standard()
+        .with_big_endian()
+        .with_fixed_int_encoding();
+    let (frame, _len): (EchonetliteFrame, usize) =
+        bincode::borrow_decode_from_slice(&erxudp.data, config).unwrap();
+    //
+    receive_from_smartmeter(pool, unit, recorded_at, &frame).await?;
+    //
+    let mut s = Vec::<String>::new();
+    s.push(frame.show());
+    for v in frame.edata.iter() {
+        s.push(v.show(Some(unit)));
     }
-    Ok(None)
+    tracing::info!("{}", s.join(" "));
+    Ok(())
 }
 
-#[tracing::instrument(skip(pool, serial_port_reader))]
+#[tracing::instrument(skip_all)]
 /// 受信
 async fn smartmeter_receiver(
     pool: &PgPool,
-    serial_port_reader: &mut io::BufReader<dyn io::Read + Send>,
     unit: &SM::UnitForCumlativeAmountsPower,
+    serial_port_reader: &mut io::BufReader<dyn io::Read + Send>,
 ) -> anyhow::Result<()> {
     loop {
-        if let Some(erxudp) = rx_erxudp(serial_port_reader)? {
-            // 受信時刻(分単位)
-            let recorded_at = {
-                let jst = Utc::now().with_timezone(&Asia::Tokyo);
-                let modified = Asia::Tokyo
-                    .with_ymd_and_hms(
-                        jst.year(),
-                        jst.month(),
-                        jst.day(),
-                        jst.hour(),
-                        jst.minute(),
-                        0,
-                    )
-                    .single()
-                    .unwrap();
-                modified.with_timezone(&Utc)
-            };
-            // ERXUDPメッセージからEchonetliteフレームを取り出す。
-            let config = bincode::config::standard()
-                .with_big_endian()
-                .with_fixed_int_encoding();
-            let (frame, _len): (EchonetliteFrame, usize) =
-                bincode::borrow_decode_from_slice(&erxudp.data, config).unwrap();
-            match frame.esv {
-                // Get_res プロパティ値読み出し応答
-                0x72 => {
-                    for v in frame.edata.iter() {
-                        match SM::Properties::try_from(v.clone()) {
-                            // 0xe2 積算電力量計測値履歴1 (正方向計測値)
-                            Ok(SM::Properties::HistoricalCumlativeAmount(hist)) => {
-                                if let Err(e) =
-                                    commit_historical_cumlative_amount(&pool, unit, &hist).await
-                                {
-                                    tracing::error!("{}", e);
-                                }
-                            }
-                            // 0xe7 瞬時電力計測値
-                            Ok(SM::Properties::InstantiousPower(epower)) => {
-                                if let Err(e) =
-                                    commit_instant_epower(&pool, &recorded_at, &epower).await
-                                {
-                                    tracing::error!("{}", e);
-                                }
-                            }
-                            // 0xe8 瞬時電流計測値
-                            Ok(SM::Properties::InstantiousCurrent(current)) => {
-                                if let Err(e) =
-                                    commit_instant_current(&pool, &recorded_at, &current).await
-                                {
-                                    tracing::error!("{}", e);
-                                }
-                            }
-                            // 0xea 定時積算電力量計測値(正方向計測値)
-                            Ok(SM::Properties::CumlativeAmountsOfPowerAtFixedTime(epower)) => {
-                                if let Err(e) =
-                                    commit_cumlative_amount_epower(&pool, unit, &epower).await
-                                {
-                                    tracing::error!("{}", e);
-                                }
-                            }
-                            //
-                            _ => {
-                                tracing::trace!(
-                                    "Unhandled ESV {}, EPC {} {:?}",
-                                    frame.esv,
-                                    v.epc,
-                                    v.show(Some(unit))
-                                );
-                            }
-                        }
-                    }
-                }
-                // INF プロパティ値通知
-                0x73 => {
-                    for v in frame.edata.iter() {
-                        match SM::Properties::try_from(v.clone()) {
-                            // 0xea 定時積算電力量計測値(正方向計測値)
-                            Ok(SM::Properties::CumlativeAmountsOfPowerAtFixedTime(epower)) => {
-                                if let Err(e) =
-                                    commit_cumlative_amount_epower(&pool, unit, &epower).await
-                                {
-                                    tracing::error!("{}", e);
-                                }
-                            }
-                            //
-                            _ => {
-                                tracing::trace!(
-                                    "Unhandled ESV {}, EPC {} {:?}",
-                                    frame.esv,
-                                    v.epc,
-                                    v.show(Some(unit))
-                                );
-                            }
-                        }
-                    }
-                }
-                //
-                esv => tracing::trace!("Unhandled ESV:{esv}"),
+        match skstack::receive(serial_port_reader) {
+            Ok(skstack::SkRxD::Void) => {}
+            Ok(r @ skstack::SkRxD::Ok) => {
+                tracing::trace!("{:?}", r);
             }
-            let mut s = Vec::<String>::new();
-            s.push(frame.show());
-            for v in frame.edata.iter() {
-                s.push(v.show(Some(unit)));
+            Ok(r @ skstack::SkRxD::Fail(_)) => {
+                tracing::trace!("{:?}", r);
             }
-            tracing::info!("{}", s.join(" "));
+            Ok(skstack::SkRxD::Event(ev)) => match ev.code {
+                0x01 => tracing::trace!("NS を受信した"),
+                0x02 => tracing::trace!("NA を受信した"),
+                0x05 => tracing::trace!("Echo Request を受信した"),
+                0x1f => tracing::trace!("ED スキャンが完了した"),
+                0x20 => tracing::trace!("Beacon を受信した"),
+                0x21 if Some(0) == ev.param => tracing::trace!("UDP の送信に成功"),
+                0x21 if Some(1) == ev.param => tracing::trace!("UDP の送信に失敗"),
+                0x22 => tracing::trace!("アクティブスキャンが完了した"),
+                0x24 => {
+                    tracing::trace!("PANA による接続過程でエラーが発生した（接続が完了しなかった）")
+                }
+                0x25 => tracing::trace!("PANA による接続が完了した"),
+                0x26 => tracing::trace!("接続相手からセッション終了要求を受信した"),
+                0x27 => tracing::trace!("PANA セッションの終了に成功した"),
+                0x28 => tracing::trace!(
+                    "PANA セッションの終了要求に対する応答がなくタイムアウトした（セ
+ッションは終了）"
+                ),
+                0x29 => bail!("セッションのライフタイムが経過して期限切れになった"),
+                0x32 => tracing::trace!("ARIB108 の送信総和時間の制限が発動した"),
+                0x33 => tracing::trace!("送信総和時間の制限が解除された"),
+                _ => tracing::trace!("{:?}", ev),
+            },
+            Ok(r @ skstack::SkRxD::Epandesc(_)) => {
+                tracing::trace!("{:?}", r);
+            }
+            Ok(skstack::SkRxD::Erxudp(erxudp)) => {
+                rx_erxudp(pool, unit, erxudp).await?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {} // タイムアウトエラーは無視する
+            Err(e) => return Err(e).context("serial port read failed!"),
         }
         // 制御を他のタスクに譲る
         tokio::task::yield_now().await;
     }
 }
 
-#[tracing::instrument(skip(serial_port))]
+#[tracing::instrument(skip_all)]
 /// 送信
 async fn smartmeter_transmitter<T: io::Write + Send>(
-    serial_port: &mut T,
     sender: &Ipv6Addr,
+    serial_port: &mut T,
 ) -> anyhow::Result<()> {
     // メッセージ送信(今日の積算電力量履歴)
     skstack::send_echonetlite(serial_port, &sender, &TODAY_CWH)?;
@@ -470,11 +473,13 @@ async fn commit_historical_cumlative_amount(
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    let file_appender = tracing_appender::rolling::daily("/var/log", "uchino_daqd.log");
     let subscriber = FmtSubscriber::builder()
         .with_max_level(tracing::Level::TRACE)
         .with_thread_names(true)
         .with_thread_ids(true)
-        .with_ansi(true)
+        .with_ansi(false)
+        .with_writer(file_appender)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
@@ -483,19 +488,9 @@ async fn main() -> anyhow::Result<()> {
     let serial_device = env::var("SERIAL_DEVICE").context("Must be set to SERIAL_DEVICE")?;
     let database_url = env::var("DATABASE_URL").context("Must be set to DATABASE_URL")?;
 
-    let stdout = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(true)
-        .open("/run/uchino_daqd.out")
-        .context("stdout file create error")?;
+    let stdout = File::create("/run/uchino_daqd.out").context("stdout file create error")?;
 
-    let stderr = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(true)
-        .open("/run/uchino_daqd.err")
-        .context("stderr file create error")?;
+    let stderr = File::create("/run/uchino_daqd.err").context("stderr file create error")?;
 
     let daemonize = Daemonize::new()
         .pid_file("/run/uchino_daqd.pid")

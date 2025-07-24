@@ -86,6 +86,7 @@ pub fn connect(
     // PANA認証開始後のイベントを処理する
     loop {
         match skstack::receive(reader) {
+            Ok(skstack::SkRxD::Void) => {}
             // OK
             Ok(skstack::SkRxD::Ok) => {}
             // FAIL ER

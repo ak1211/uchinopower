@@ -1,6 +1,6 @@
 [package]
 name = "uchinoepower"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2024"
 
 [dependencies]
@@ -21,4 +21,5 @@ sqlx = { version = "0.8.6", features = ["chrono", "rust_decimal", "postgres", "r
 tokio = { version = "1.46.0", features = ["full"] }
 toml = "0.8.23"
 tracing = "0.1.41"
+tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "local-time"] }

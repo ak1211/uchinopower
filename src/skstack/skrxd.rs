@@ -40,4 +40,5 @@ pub enum SkRxD {
     Erxudp(Erxudp),     // ERXUDP受信
     Fail(u8),           // 失敗
     Ok,                 // 成功
+    Void,               // 空行
 }

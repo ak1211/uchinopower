@@ -32,6 +32,7 @@ pub fn active_scan(
     // アクティブスキャン結果待ち
     'exit: loop {
         match skstack::receive(port_reader) {
+            Ok(skstack::SkRxD::Void) => {}
             Ok(skstack::SkRxD::Ok) => {}
             Ok(fail @ skstack::SkRxD::Fail(_)) => {
                 tracing::debug!("{:?}", fail);

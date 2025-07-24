@@ -81,6 +81,7 @@ pub fn pairing(
             // イベント受信
             'exit: loop {
                 match skstack::receive(port_reader) {
+                    Ok(skstack::SkRxD::Void) => {}
                     Ok(r @ skstack::SkRxD::Ok) => {
                         tracing::trace!("{:?}", r);
                     }

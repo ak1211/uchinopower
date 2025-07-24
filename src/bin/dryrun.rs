@@ -301,6 +301,7 @@ fn exec_dryrun(cli: &Cli) -> anyhow::Result<()> {
 /// イベント受信
 fn take_erxudp(serial_port_reader: &mut BufReader<dyn io::Read>) -> anyhow::Result<Option<Erxudp>> {
     match skstack::receive(serial_port_reader) {
+        Ok(skstack::SkRxD::Void) => {}
         Ok(r @ skstack::SkRxD::Ok) => {
             tracing::trace!("{:?}", r);
         }
