@@ -195,12 +195,6 @@ async fn receive_from_smartmeter<'a>(
         //
         unhandled_esv => tracing::trace!("Unhandled ESV 0x{:X}", unhandled_esv),
     }
-    let mut s = Vec::<String>::new();
-    s.push(frame.show());
-    for v in frame.edata.iter() {
-        s.push(v.show(Some(unit)));
-    }
-    tracing::info!("{}", s.join(" "));
     Ok(())
 }
 
