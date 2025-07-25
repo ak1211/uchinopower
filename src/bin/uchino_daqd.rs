@@ -11,9 +11,9 @@ use rust_decimal::Decimal;
 use serialport::{DataBits, SerialPort, StopBits};
 use sqlx::{self, QueryBuilder, postgres::PgPool};
 use std::env;
-use std::fs::File;
 use std::io::{self, BufReader};
 use std::net::Ipv6Addr;
+use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -128,12 +128,14 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
                 tracing::error!("tx_result:{:?}", tx_result);
             }
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tracing::trace!("sleep");
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        tracing::trace!("reconnect");
     }
 }
 
-/// スマートメーターから受信
-async fn receive_from_smartmeter<'a>(
+/// 受信値をデーターベースに蓄積する
+async fn commit_to_database<'a>(
     pool: &PgPool,
     unit: &SM::UnitForCumlativeAmountsPower,
     recorded_at: DateTime<Utc>,
@@ -161,14 +163,7 @@ async fn receive_from_smartmeter<'a>(
                         let _ = commit_cumlative_amount_epower(&pool, unit, &epower).await?;
                     }
                     //
-                    _ => {
-                        tracing::trace!(
-                            "Unhandled ESV 0x{:X}, EPC 0x{:X} {:?}",
-                            frame.esv,
-                            v.epc,
-                            v.show(Some(unit))
-                        );
-                    }
+                    _ => {}
                 }
             }
         }
@@ -181,19 +176,12 @@ async fn receive_from_smartmeter<'a>(
                         let _ = commit_cumlative_amount_epower(&pool, unit, &epower).await?;
                     }
                     //
-                    _ => {
-                        tracing::trace!(
-                            "Unhandled ESV 0x{:X}, EPC 0x{:X} {:?}",
-                            frame.esv,
-                            v.epc,
-                            v.show(Some(unit))
-                        );
-                    }
+                    _ => {}
                 }
             }
         }
         //
-        unhandled_esv => tracing::trace!("Unhandled ESV 0x{:X}", unhandled_esv),
+        _esv => {}
     }
     Ok(())
 }
@@ -226,9 +214,9 @@ async fn rx_erxudp(
         .with_fixed_int_encoding();
     let (frame, _len): (EchonetliteFrame, usize) =
         bincode::borrow_decode_from_slice(&erxudp.data, config).unwrap();
-    //
-    receive_from_smartmeter(pool, unit, recorded_at, &frame).await?;
-    //
+    // 受信値をデーターベースに蓄積する
+    commit_to_database(pool, unit, recorded_at, &frame).await?;
+    // 受信値をログに出す
     let mut s = Vec::<String>::new();
     s.push(frame.show());
     for v in frame.edata.iter() {
@@ -466,10 +454,13 @@ async fn commit_historical_cumlative_amount(
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> ExitCode {
     let file_appender = tracing_appender::rolling::daily("/var/log", "uchino_daqd.log");
     let subscriber = FmtSubscriber::builder()
         .with_max_level(tracing::Level::TRACE)
+        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
+        .with_file(false)
+        .with_line_number(false)
         .with_thread_names(true)
         .with_thread_ids(true)
         .with_ansi(false)
@@ -478,29 +469,25 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    // 環境変数
-    let serial_device = env::var("SERIAL_DEVICE").context("Must be set to SERIAL_DEVICE")?;
-    let database_url = env::var("DATABASE_URL").context("Must be set to DATABASE_URL")?;
+    let launcher = async || -> anyhow::Result<()> {
+        // 環境変数
+        let serial_device = env::var("SERIAL_DEVICE").context("Must be set to SERIAL_DEVICE")?;
+        let database_url = env::var("DATABASE_URL").context("Must be set to DATABASE_URL")?;
 
-    let stdout = File::create("/run/uchino_daqd.out").context("stdout file create error")?;
+        let daemonize = Daemonize::new()
+            .pid_file("/run/uchino_daqd.pid")
+            .working_directory("/tmp")
+            .user("nobody")
+            .group("dialout");
+        daemonize.start()?;
+        exec_data_acquisition(&serial_device, &database_url).await
+    };
 
-    let stderr = File::create("/run/uchino_daqd.err").context("stderr file create error")?;
-
-    let daemonize = Daemonize::new()
-        .pid_file("/run/uchino_daqd.pid")
-        .working_directory("/tmp")
-        .user("nobody")
-        .group("dialout")
-        .stdout(stdout)
-        .stderr(stderr);
-
-    match daemonize.start() {
-        Ok(_) => {
-            if let Err(e) = exec_data_acquisition(&serial_device, &database_url).await {
-                tracing::error!("{}", e);
-            }
+    match launcher().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::error!("{}", e);
+            ExitCode::FAILURE
         }
-        Err(e) => tracing::error!("{}", e),
     }
-    Ok(())
 }
