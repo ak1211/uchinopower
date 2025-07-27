@@ -205,8 +205,7 @@ async fn smartmeter_receiver(
                 0x26 => tracing::trace!("接続相手からセッション終了要求を受信した"),
                 0x27 => tracing::trace!("PANA セッションの終了に成功した"),
                 0x28 => tracing::trace!(
-                    "PANA セッションの終了要求に対する応答がなくタイムアウトした（セ
-ッションは終了）"
+                    "PANA セッションの終了要求に対する応答がなくタイムアウトした（セッションは終了）"
                 ),
                 0x29 => {
                     tracing::trace!("セッションのライフタイムが経過して期限切れになった");
@@ -451,7 +450,7 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
                     // PANA セッションの有効期限切れによる再認証
                     tracing::trace!("PANA session expired, reconnect");
                     tokio::time::sleep(Duration::from_secs(10)).await;
-                    skstack::send(&mut serial_port, b"SKREJOIN")?;
+                    skstack::send(&mut serial_port, b"SKREJOIN\r\n")?;
                     if let skstack::SkRxD::Fail(code) = skstack::receive(&mut serial_port_reader)? {
                         bail!("再認証に失敗しました。 ER {:X}", code);
                     }
