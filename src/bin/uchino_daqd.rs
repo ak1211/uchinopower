@@ -77,63 +77,6 @@ static INSTANT_WATT_AMPERE: LazyLock<EchonetliteFrame> = LazyLock::new(|| {
     }
 });
 
-/// スマートメーターからデーターを収集する
-async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::Result<()> {
-    let pool = PgPool::connect(database_url).await?;
-
-    // データベースからスマートメーターの情報を得る
-    let settings = read_settings(&pool).await?;
-    let credentials = authn::Credentials {
-        id: authn::Id::from_str(&settings.RouteBId).map_err(|s| anyhow!(s))?,
-        password: authn::Password::from_str(&settings.RouteBPassword).map_err(|s| anyhow!(s))?,
-    };
-    let mac_address =
-        u64::from_str_radix(&settings.MacAddress, 16).context("MacAddress parse error")?;
-
-    // MACアドレスからIPv6リンクローカルアドレスへ変換する
-    // MACアドレスの最初の1バイト下位2bit目を反転して
-    // 0xFE80000000000000XXXXXXXXXXXXXXXXのXXをMACアドレスに置き換える
-    let sender = Ipv6Addr::from_bits(
-        0xFE80_0000_0000_0000u128 << 64 | (mac_address as u128 ^ 0x0200_0000_0000_0000u128),
-    );
-
-    // シリアルポートを開く
-    let mut serial_port = open_port(port_name)?;
-
-    // シリアルポート読み込みはバッファリングする
-    let mut serial_port_reader = serial_port
-        .try_clone()
-        .and_then(|cloned| Ok(BufReader::new(cloned)))
-        .context("Failed to clone")?;
-
-    loop {
-        // スマートメーターと接続する
-        authn::connect(
-            &mut serial_port_reader,
-            &mut serial_port,
-            &credentials,
-            &sender,
-            settings.Channel,
-            settings.PanId,
-        )?;
-        tokio::select! {
-            // イベント受信用スレッド
-            rx_result = smartmeter_receiver(&pool, &settings.Unit, &mut serial_port_reader) => {
-                // スレッドは無限ループなのでここでは必ずエラー
-                tracing::error!("rx_result:{:?}", rx_result);
-            },
-            // イベント送信用スレッド
-            tx_result = smartmeter_transmitter(&sender, &mut serial_port) => {
-                // スレッドは無限ループなのでここでは必ずエラー
-                tracing::error!("tx_result:{:?}", tx_result);
-            }
-        }
-        tracing::trace!("sleep");
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        tracing::trace!("reconnect");
-    }
-}
-
 /// 受信値をデーターベースに蓄積する
 async fn commit_to_database<'a>(
     pool: &PgPool,
@@ -226,13 +169,17 @@ async fn rx_erxudp(
     Ok(())
 }
 
+enum ReceiverTerminationReason {
+    SessionExpired,
+}
+
 #[tracing::instrument(skip_all)]
 /// 受信
 async fn smartmeter_receiver(
     pool: &PgPool,
     unit: &SM::UnitForCumlativeAmountsPower,
     serial_port_reader: &mut io::BufReader<dyn io::Read + Send>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ReceiverTerminationReason> {
     loop {
         match skstack::receive(serial_port_reader) {
             Ok(skstack::SkRxD::Void) => {}
@@ -261,7 +208,10 @@ async fn smartmeter_receiver(
                     "PANA セッションの終了要求に対する応答がなくタイムアウトした（セ
 ッションは終了）"
                 ),
-                0x29 => bail!("セッションのライフタイムが経過して期限切れになった"),
+                0x29 => {
+                    tracing::trace!("セッションのライフタイムが経過して期限切れになった");
+                    return Ok(ReceiverTerminationReason::SessionExpired);
+                }
                 0x32 => tracing::trace!("ARIB108 の送信総和時間の制限が発動した"),
                 0x33 => tracing::trace!("送信総和時間の制限が解除された"),
                 _ => tracing::trace!("{:?}", ev),
@@ -451,6 +401,67 @@ async fn commit_historical_cumlative_amount(
     query.execute(pool).await?;
 
     Ok(())
+}
+
+/// スマートメーターからデーターを収集する
+async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::Result<()> {
+    let pool = PgPool::connect(database_url).await?;
+
+    // データベースからスマートメーターの情報を得る
+    let settings = read_settings(&pool).await?;
+    let credentials = authn::Credentials {
+        id: authn::Id::from_str(&settings.RouteBId).map_err(|s| anyhow!(s))?,
+        password: authn::Password::from_str(&settings.RouteBPassword).map_err(|s| anyhow!(s))?,
+    };
+    let mac_address =
+        u64::from_str_radix(&settings.MacAddress, 16).context("MacAddress parse error")?;
+
+    // MACアドレスからIPv6リンクローカルアドレスへ変換する
+    // MACアドレスの最初の1バイト下位2bit目を反転して
+    // 0xFE80000000000000XXXXXXXXXXXXXXXXのXXをMACアドレスに置き換える
+    let sender = Ipv6Addr::from_bits(
+        0xFE80_0000_0000_0000u128 << 64 | (mac_address as u128 ^ 0x0200_0000_0000_0000u128),
+    );
+
+    // シリアルポートを開く
+    let mut serial_port = open_port(port_name)?;
+
+    // シリアルポート読み込みはバッファリングする
+    let mut serial_port_reader = serial_port
+        .try_clone()
+        .and_then(|cloned| Ok(BufReader::new(cloned)))
+        .context("Failed to clone")?;
+
+    // スマートメーターと接続する
+    authn::connect(
+        &mut serial_port_reader,
+        &mut serial_port,
+        &credentials,
+        &sender,
+        settings.Channel,
+        settings.PanId,
+    )?;
+
+    loop {
+        tokio::select! {
+            // イベント受信用スレッド
+            rx_result = smartmeter_receiver(&pool, &settings.Unit, &mut serial_port_reader) => match rx_result{
+                Err(e)=> tracing::error!("rx_result:{:?}", e),
+                Ok(ReceiverTerminationReason::SessionExpired) => {
+                    // PANA セッションの有効期限切れによる再認証
+                    tracing::trace!("PANA session expired, reconnect");
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    skstack::send(&mut serial_port, b"SKREJOIN")?;
+                    if let skstack::SkRxD::Fail(code) = skstack::receive(&mut serial_port_reader)? {
+                        bail!("再認証に失敗しました。 ER {:X}", code);
+                    }
+                }
+            },
+            // イベント送信用スレッド
+            Ok(())= smartmeter_transmitter(&sender, &mut serial_port) => {}
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]

@@ -325,6 +325,7 @@ fn take_erxudp(serial_port_reader: &mut BufReader<dyn io::Read>) -> anyhow::Resu
 fn main() -> anyhow::Result<()> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(tracing::Level::TRACE)
+        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
         .with_thread_names(true)
         .with_thread_ids(true)
         .finish();
