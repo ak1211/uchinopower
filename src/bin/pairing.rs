@@ -52,7 +52,7 @@ fn open_port(port_name: &str) -> anyhow::Result<Box<dyn SerialPort>> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let _ = dotenv::dotenv();
+    dotenv::dotenv()?;
 
     let subscriber = FmtSubscriber::builder()
         .with_max_level(tracing::Level::TRACE)

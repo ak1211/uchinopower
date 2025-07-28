@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 // SPDX-FileCopyrightText: 2025 Akihiro Yamamoto <github.com/ak1211>
 //
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, anyhow};
 use chrono::{DateTime, Datelike, Days, TimeDelta, TimeZone, Timelike, Utc};
 use chrono_tz::Asia;
 use cron::Schedule;
@@ -444,22 +444,22 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
     loop {
         tokio::select! {
             // イベント受信用スレッド
-            rx_result = smartmeter_receiver(&pool, &settings.Unit, &mut serial_port_reader) => match rx_result{
-                Err(e)=> tracing::error!("rx_result:{:?}", e),
+            rx_result = smartmeter_receiver(&pool, &settings.Unit, &mut serial_port_reader) => match rx_result {
+                Err(e) => tracing::error!("rx_result:{:?}", e),
                 Ok(ReceiverTerminationReason::SessionExpired) => {
                     // PANA セッションの有効期限切れによる再認証
-                    tracing::trace!("PANA session expired, reconnect");
-                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    tracing::trace!("PANA session expired, try to reconnect.");
                     skstack::send(&mut serial_port, b"SKREJOIN\r\n")?;
-                    if let skstack::SkRxD::Fail(code) = skstack::receive(&mut serial_port_reader)? {
-                        bail!("再認証に失敗しました。 ER {:X}", code);
-                    }
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    continue;
                 }
             },
             // イベント送信用スレッド
-            Ok(())= smartmeter_transmitter(&sender, &mut serial_port) => {}
+            tx_result = smartmeter_transmitter(&sender, &mut serial_port) => match tx_result {
+                Err(e) => tracing::error!("tx_result:{:?}", e),
+                Ok(()) => continue
+            }
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -494,7 +494,10 @@ async fn main() -> ExitCode {
     };
 
     match launcher().await {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            tracing::info!("exit");
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             tracing::error!("{}", e);
             ExitCode::FAILURE
