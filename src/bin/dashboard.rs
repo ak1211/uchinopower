@@ -33,7 +33,7 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenv::dotenv()?;
+    let _ = dotenv::dotenv();
     let database_url = env::var("DATABASE_URL").wrap_err("Must be set to DATABASE_URL")?;
     let pool = PgPool::connect(&database_url).await?;
     color_eyre::install()?;
@@ -115,7 +115,12 @@ impl App {
         .areas(frame.area());
         let now = Utc::now();
 
-        frame.render_widget("DASHBOARD".bold().into_centered_line(), title);
+        frame.render_widget(
+            "DASHBOARD (press q key to exit.)"
+                .bold()
+                .into_centered_line(),
+            title,
+        );
         frame.render_widget(
             cumlative_amount_epower_chart(now, &self.cumlative_amount_epower),
             upper,

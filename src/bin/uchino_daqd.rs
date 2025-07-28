@@ -445,19 +445,18 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
         tokio::select! {
             // イベント受信用スレッド
             rx_result = smartmeter_receiver(&pool, &settings.Unit, &mut serial_port_reader) => match rx_result {
-                Err(e) => tracing::error!("rx_result:{:?}", e),
+                Err(e) => return Err(e),
                 Ok(ReceiverTerminationReason::SessionExpired) => {
                     // PANA セッションの有効期限切れによる再認証
                     tracing::trace!("PANA session expired, try to reconnect.");
                     skstack::send(&mut serial_port, b"SKREJOIN\r\n")?;
                     tokio::time::sleep(Duration::from_secs(60)).await;
-                    continue;
                 }
             },
             // イベント送信用スレッド
             tx_result = smartmeter_transmitter(&sender, &mut serial_port) => match tx_result {
-                Err(e) => tracing::error!("tx_result:{:?}", e),
-                Ok(()) => continue
+                Err(e) => return Err(e),
+                Ok(()) => {}
             }
         }
     }
