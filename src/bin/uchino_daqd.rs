@@ -447,10 +447,16 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
             rx_result = smartmeter_receiver(&pool, &settings.Unit, &mut serial_port_reader) => match rx_result {
                 Err(e) => return Err(e),
                 Ok(ReceiverTerminationReason::SessionExpired) => {
-                    // PANA セッションの有効期限切れによる再認証
-                    tracing::trace!("PANA session expired, try to reconnect.");
-                    skstack::send(&mut serial_port, b"SKREJOIN\r\n")?;
-                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    // PANA セッションの有効期限切れによる再接続
+                    tracing::trace!("PANA session expired, try to connect.");
+                    authn::connect(
+                        &mut serial_port_reader,
+                        &mut serial_port,
+                        &credentials,
+                        &sender,
+                        settings.Channel,
+                        settings.PanId,
+                    )?;
                 }
             },
             // イベント送信用スレッド
