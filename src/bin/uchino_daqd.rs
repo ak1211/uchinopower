@@ -16,7 +16,7 @@ use std::net::Ipv6Addr;
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::LazyLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio;
 use tracing_appender;
 use tracing_subscriber::FmtSubscriber;
@@ -238,10 +238,13 @@ async fn smartmeter_receiver(
 /// 送信
 async fn smartmeter_transmitter<T: io::Write + Send>(
     sender: &Ipv6Addr,
+    session_rejoin_period: Duration,
     serial_port: &mut T,
 ) -> anyhow::Result<()> {
     // メッセージ送信(今日の積算電力量履歴)
     skstack::send_echonetlite(serial_port, &sender, &TODAY_CWH)?;
+
+    let mut rejoin_time = Instant::now() + session_rejoin_period;
 
     // スケジュールに則りメッセージ送信
     let schedule = Schedule::from_str("00 */1 * * * *")?;
@@ -252,6 +255,13 @@ async fn smartmeter_transmitter<T: io::Write + Send>(
         tokio::time::sleep(duration).await;
         // メッセージ送信(瞬時電力と瞬時電流計測値)
         skstack::send_echonetlite(serial_port, &sender, &INSTANT_WATT_AMPERE)?;
+        // 再認証を要求する
+        let now = Instant::now();
+        if now >= rejoin_time {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            skstack::send(serial_port, b"SKREJOIN\r\n").context("write failed!")?;
+            rejoin_time = now + session_rejoin_period;
+        }
     }
     Ok(())
 }
@@ -446,12 +456,30 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
         settings.PanId,
     )?;
 
+    // PANA セッションライフタイム値
+    const SESSION_LIFETIME_OF_SECOND: u32 = 900;
+
+    // PANA セッション再認証間隔
+    let session_rejoin_period = Duration::from_secs_f32(SESSION_LIFETIME_OF_SECOND as f32 * 0.7);
+
+    let custom_commands = [
+        format!("SKSREG S16 {:X}\r\n", SESSION_LIFETIME_OF_SECOND), // PANA セッションライフタイム値
+    ];
+
+    // コマンド発行
+    for command in custom_commands.iter() {
+        skstack::send(&mut serial_port, command.as_bytes()).context("write failed!")?;
+        if let skstack::SkRxD::Fail(code) = skstack::receive(&mut serial_port_reader)? {
+            bail!("\"{}\" コマンド実行に失敗しました。 ER{}", command, code);
+        }
+    }
+
     //
     tokio::select! {
         // イベント受信用スレッド
         r = smartmeter_receiver(&pool, &settings.Unit, &mut serial_port_reader) => return r,
         // イベント送信用スレッド
-        r = smartmeter_transmitter(&sender, &mut serial_port) => return r
+        r = smartmeter_transmitter(&sender, session_rejoin_period ,&mut serial_port) => return r
     }
 }
 
