@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 // SPDX-FileCopyrightText: 2025 Akihiro Yamamoto <github.com/ak1211>
 //
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Datelike, Days, TimeDelta, TimeZone, Timelike, Utc};
 use chrono_tz::Asia;
 use cron::Schedule;
@@ -148,29 +148,34 @@ async fn rx_erxudp(
                 0,
             )
             .single()
-            .unwrap();
+            .context("time calcutate error")?;
         modified.with_timezone(&Utc)
     };
     // ERXUDPメッセージからEchonetliteフレームを取り出す。
     let config = bincode::config::standard()
         .with_big_endian()
         .with_fixed_int_encoding();
-    let (frame, _len): (EchonetliteFrame, usize) =
-        bincode::borrow_decode_from_slice(&erxudp.data, config).unwrap();
-    // 受信値をデーターベースに蓄積する
-    commit_to_database(pool, unit, recorded_at, &frame).await?;
-    // 受信値をログに出す
-    let mut s = Vec::<String>::new();
-    s.push(frame.show());
-    for v in frame.edata.iter() {
-        s.push(v.show(Some(unit)));
-    }
-    tracing::info!("{}", s.join(" "));
-    Ok(())
-}
 
-enum ReceiverTerminationReason {
-    SessionExpired,
+    let decoded: Result<(EchonetliteFrame, usize), _> =
+        bincode::borrow_decode_from_slice(&erxudp.data, config);
+
+    match decoded {
+        Ok((frame, _len)) => {
+            // 受信値をデーターベースに蓄積する
+            commit_to_database(pool, unit, recorded_at, &frame).await?;
+            // 受信値をログに出す
+            let mut s = Vec::<String>::new();
+            s.push(frame.show());
+            for v in frame.edata.iter() {
+                s.push(v.show(Some(unit)));
+            }
+            tracing::info!("{}", s.join(" "));
+        }
+        Err(e) => {
+            tracing::trace!("{}", e);
+        }
+    }
+    Ok(())
 }
 
 #[tracing::instrument(skip_all)]
@@ -179,7 +184,7 @@ async fn smartmeter_receiver(
     pool: &PgPool,
     unit: &SM::UnitForCumlativeAmountsPower,
     serial_port_reader: &mut io::BufReader<dyn io::Read + Send>,
-) -> anyhow::Result<ReceiverTerminationReason> {
+) -> anyhow::Result<()> {
     loop {
         match skstack::receive(serial_port_reader) {
             Ok(skstack::SkRxD::Void) => {}
@@ -209,7 +214,7 @@ async fn smartmeter_receiver(
                 ),
                 0x29 => {
                     tracing::trace!("セッションのライフタイムが経過して期限切れになった");
-                    return Ok(ReceiverTerminationReason::SessionExpired);
+                    bail!("PANA session expiered")
                 }
                 0x32 => tracing::trace!("ARIB108 の送信総和時間の制限が発動した"),
                 0x33 => tracing::trace!("送信総和時間の制限が解除された"),
@@ -333,7 +338,7 @@ async fn commit_cumlative_amount_epower(
             epower.time_point.second(),
         )
         .single()
-        .unwrap();
+        .context("time calcutate error")?;
     let kwh = Decimal::from(epower.cumlative_amounts_power) * unit.0;
     let rec = sqlx::query!(
         r#"
@@ -360,16 +365,16 @@ async fn commit_historical_cumlative_amount(
     let jst_today = Asia::Tokyo
         .with_ymd_and_hms(jst_now.year(), jst_now.month(), jst_now.day(), 0, 0, 0)
         .single()
-        .unwrap();
+        .context("time calcutate error")?;
     let day = jst_today
         .checked_sub_days(Days::new(hist.n_days_ago as u64))
         .with_context(|| format!("n_days_ago:{}", hist.n_days_ago))?;
-    let halfhour = TimeDelta::new(30 * 60, 0).unwrap();
+    let halfhour = TimeDelta::new(30 * 60, 0).context("time calcutate error")?;
     //
-    let mut accumulator = day;
+    let mut accumulator = Some(day);
     let timeserial = std::iter::from_fn(move || {
-        let ret = Some(accumulator);
-        accumulator = accumulator.checked_add_signed(halfhour).unwrap();
+        let ret = accumulator;
+        accumulator = accumulator.and_then(|v| v.checked_add_signed(halfhour));
         ret
     });
     //
@@ -441,30 +446,12 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
         settings.PanId,
     )?;
 
-    loop {
-        tokio::select! {
-            // イベント受信用スレッド
-            rx_result = smartmeter_receiver(&pool, &settings.Unit, &mut serial_port_reader) => match rx_result {
-                Err(e) => return Err(e),
-                Ok(ReceiverTerminationReason::SessionExpired) => {
-                    // PANA セッションの有効期限切れによる再接続
-                    tracing::trace!("PANA session expired, try to connect.");
-                    authn::connect(
-                        &mut serial_port_reader,
-                        &mut serial_port,
-                        &credentials,
-                        &sender,
-                        settings.Channel,
-                        settings.PanId,
-                    )?;
-                }
-            },
-            // イベント送信用スレッド
-            tx_result = smartmeter_transmitter(&sender, &mut serial_port) => match tx_result {
-                Err(e) => return Err(e),
-                Ok(()) => {}
-            }
-        }
+    //
+    tokio::select! {
+        // イベント受信用スレッド
+        r = smartmeter_receiver(&pool, &settings.Unit, &mut serial_port_reader) => return r,
+        // イベント送信用スレッド
+        r = smartmeter_transmitter(&sender, &mut serial_port) => return r
     }
 }
 

@@ -49,7 +49,7 @@ pub fn send_echonetlite(
     let config = bincode::config::standard()
         .with_big_endian()
         .with_fixed_int_encoding();
-    let payload = bincode::encode_to_vec(frame, config).unwrap();
+    let payload = bincode::encode_to_vec(frame, config)?;
     let sksendto = format!(
         "SKSENDTO 1 {} {:04X} 1 {:04X} ",
         sender_address,

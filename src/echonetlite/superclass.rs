@@ -169,12 +169,19 @@ impl<'a> TryFrom<EchonetliteEdata<'a>> for NotifyInstances {
             [count, data @ ..] if edata.epc == Self::EPC => {
                 let instances = data
                     .chunks_exact(3) // 3バイトづつ
-                    .map(|triple| triple.try_into().unwrap())
-                    .collect::<Vec<[u8; 3]>>();
-                Ok(NotifyInstances {
-                    count: *count,
-                    instances,
-                })
+                    .map(|triple| {
+                        triple
+                            .try_into()
+                            .map_err(|e: std::array::TryFromSliceError| e.to_string())
+                    })
+                    .collect::<Vec<Result<[u8; 3], Self::Error>>>();
+                instances
+                    .into_iter()
+                    .collect::<Result<Vec<[u8; 3]>, Self::Error>>()
+                    .map(|v| NotifyInstances {
+                        count: *count,
+                        instances: v,
+                    })
             }
             _ => Err(format!("BAD EPC:0x{:X} EDT:{:?}", edata.epc, edata.edt)),
         }

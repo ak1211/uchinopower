@@ -288,7 +288,7 @@ impl<'a> TryFrom<EchonetliteEdata<'a>> for HistoricalCumlativeAmount {
                     let dword = quadruple
                         .try_into()
                         .map(|n: [u8; 4]| u32::from_be_bytes(n))
-                        .unwrap();
+                        .map_err(|e| e.to_string())?;
                     //
                     vs.push(if dword == 0xfffffffe {
                         None
@@ -426,7 +426,7 @@ impl<'a> TryFrom<EchonetliteEdata<'a>> for CumlativeAmountsOfPowerAtFixedTime {
                 let year = u16::from_be_bytes([year0, year1]);
                 let datetime = NaiveDate::from_ymd_opt(year as i32, month as u32, day as u32)
                     .and_then(|a| a.and_hms_opt(hour as u32, minute as u32, second as u32))
-                    .unwrap();
+                    .ok_or("time calculate error")?;
                 let value = u32::from_be_bytes([
                     cumlative_watt_hour0,
                     cumlative_watt_hour1,

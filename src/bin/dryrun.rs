@@ -244,7 +244,7 @@ fn exec_dryrun(cli: &Cli) -> anyhow::Result<()> {
                         .with_big_endian()
                         .with_fixed_int_encoding();
                     let (frame, _len): (EchonetliteFrame, usize) =
-                        bincode::borrow_decode_from_slice(&erxudp.data, config).unwrap();
+                        bincode::borrow_decode_from_slice(&erxudp.data, config)?;
                     let mut s = Vec::<String>::new();
                     s.push(frame.show());
                     for v in frame.edata.iter() {

@@ -41,15 +41,21 @@ impl<'a> EchonetliteFrame<'a> {
                 let config = bincode::config::standard()
                     .with_big_endian()
                     .with_fixed_int_encoding();
-                let encoded = bincode::encode_to_vec(self, config).unwrap();
-                format!(
-                    "よくわからないESV値 N={} frame={}",
-                    self.opc,
-                    encoded
-                        .into_iter()
-                        .map(|n| format!("{:02X}", n))
-                        .collect::<String>()
-                )
+                match bincode::encode_to_vec(self, config) {
+                    Ok(encoded) => {
+                        format!(
+                            "よくわからないESV値 N={} frame={}",
+                            self.opc,
+                            encoded
+                                .into_iter()
+                                .map(|n| format!("{:02X}", n))
+                                .collect::<String>()
+                        )
+                    }
+                    Err(e) => {
+                        format!("{}", e.to_string())
+                    }
+                }
             }
         }
     }
@@ -60,24 +66,30 @@ impl<'de, Context> bincode::BorrowDecode<'de, Context> for EchonetliteFrame<'de>
         decoder: &mut D,
     ) -> core::result::Result<Self, bincode::error::DecodeError> {
         let ehd: u16 = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let tid: u16 = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let seoj: [u8; 3] = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let deoj: [u8; 3] = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let esv: u8 = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let opc: u8 = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let mut edata: Vec<EchonetliteEdata> = Vec::new();
-        for _idx in 0..opc {
-            edata.push(bincode::BorrowDecode::borrow_decode(decoder)?);
+        if ehd == 0x1081 {
+            let tid: u16 = bincode::BorrowDecode::borrow_decode(decoder)?;
+            let seoj: [u8; 3] = bincode::BorrowDecode::borrow_decode(decoder)?;
+            let deoj: [u8; 3] = bincode::BorrowDecode::borrow_decode(decoder)?;
+            let esv: u8 = bincode::BorrowDecode::borrow_decode(decoder)?;
+            let opc: u8 = bincode::BorrowDecode::borrow_decode(decoder)?;
+            let mut edata: Vec<EchonetliteEdata> = Vec::new();
+            for _idx in 0..opc {
+                edata.push(bincode::BorrowDecode::borrow_decode(decoder)?);
+            }
+            Ok(Self {
+                ehd,
+                tid,
+                seoj,
+                deoj,
+                esv,
+                opc,
+                edata,
+            })
+        } else {
+            Err(bincode::error::DecodeError::Other(
+                "This data is not an Echonetlite Frame",
+            ))
         }
-        Ok(Self {
-            ehd,
-            tid,
-            seoj,
-            deoj,
-            esv,
-            opc,
-            edata,
-        })
     }
 }
 
