@@ -178,6 +178,16 @@ async fn rx_erxudp(
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+enum ReceiverTerminationError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("PANA session expired")]
+    PanaSessionExpired,
+    #[error("PANA session terminated")]
+    PanaSessionTerminated,
+}
+
 #[tracing::instrument(skip_all)]
 /// 受信
 async fn smartmeter_receiver(
@@ -204,17 +214,26 @@ async fn smartmeter_receiver(
                 0x21 if Some(1) == ev.param => tracing::trace!("UDP の送信に失敗"),
                 0x22 => tracing::trace!("アクティブスキャンが完了した"),
                 0x24 => {
-                    tracing::trace!("PANA による接続過程でエラーが発生した（接続が完了しなかった）")
+                    tracing::trace!(
+                        "PANA による接続過程でエラーが発生した（接続が完了しなかった）"
+                    );
+                    bail!(ReceiverTerminationError::PanaSessionTerminated)
                 }
                 0x25 => tracing::trace!("PANA による接続が完了した"),
                 0x26 => tracing::trace!("接続相手からセッション終了要求を受信した"),
-                0x27 => tracing::trace!("PANA セッションの終了に成功した"),
-                0x28 => tracing::trace!(
-                    "PANA セッションの終了要求に対する応答がなくタイムアウトした（セッションは終了）"
-                ),
+                0x27 => {
+                    tracing::trace!("PANA セッションの終了に成功した");
+                    bail!(ReceiverTerminationError::PanaSessionTerminated)
+                }
+                0x28 => {
+                    tracing::trace!(
+                        "PANA セッションの終了要求に対する応答がなくタイムアウトした（セッションは終了）"
+                    );
+                    bail!(ReceiverTerminationError::PanaSessionTerminated)
+                }
                 0x29 => {
                     tracing::trace!("セッションのライフタイムが経過して期限切れになった");
-                    bail!("PANA session expiered")
+                    bail!(ReceiverTerminationError::PanaSessionExpired);
                 }
                 0x32 => tracing::trace!("ARIB108 の送信総和時間の制限が発動した"),
                 0x33 => tracing::trace!("送信総和時間の制限が解除された"),
@@ -227,7 +246,7 @@ async fn smartmeter_receiver(
                 rx_erxudp(pool, unit, erxudp).await?;
             }
             Err(e) if e.kind() == io::ErrorKind::TimedOut => {} // タイムアウトエラーは無視する
-            Err(e) => return Err(e).context("serial port read failed!"),
+            Err(e) => bail!(ReceiverTerminationError::Io(e)),
         }
         // 制御を他のタスクに譲る
         tokio::task::yield_now().await;
@@ -446,16 +465,6 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
         .and_then(|cloned| Ok(BufReader::new(cloned)))
         .context("Failed to clone")?;
 
-    // スマートメーターと接続する
-    authn::connect(
-        &mut serial_port_reader,
-        &mut serial_port,
-        &credentials,
-        &sender,
-        settings.Channel,
-        settings.PanId,
-    )?;
-
     // PANA セッションライフタイム値
     const SESSION_LIFETIME_OF_SECOND: u32 = 900;
 
@@ -466,20 +475,40 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
         format!("SKSREG S16 {:X}\r\n", SESSION_LIFETIME_OF_SECOND), // PANA セッションライフタイム値
     ];
 
-    // コマンド発行
-    for command in custom_commands.iter() {
-        skstack::send(&mut serial_port, command.as_bytes()).context("write failed!")?;
-        if let skstack::SkRxD::Fail(code) = skstack::receive(&mut serial_port_reader)? {
-            bail!("\"{}\" コマンド実行に失敗しました。 ER{}", command, code);
+    loop {
+        // スマートメーターと接続する
+        authn::connect(
+            &mut serial_port_reader,
+            &mut serial_port,
+            &credentials,
+            &sender,
+            settings.Channel,
+            settings.PanId,
+        )?;
+        // 追加コマンド発行
+        for command in custom_commands.iter() {
+            skstack::send(&mut serial_port, command.as_bytes()).context("write failed!")?;
+            if let skstack::SkRxD::Fail(code) = skstack::receive(&mut serial_port_reader)? {
+                bail!("\"{}\" コマンド実行に失敗しました。 ER{}", command, code);
+            }
         }
-    }
-
-    //
-    tokio::select! {
-        // イベント受信用スレッド
-        r = smartmeter_receiver(&pool, &settings.Unit, &mut serial_port_reader) => return r,
-        // イベント送信用スレッド
-        r = smartmeter_transmitter(&sender, session_rejoin_period ,&mut serial_port) => return r
+        //
+        let result = tokio::select! {
+            // イベント受信用スレッド
+            r = smartmeter_receiver(&pool, &settings.Unit, &mut serial_port_reader) => r,
+            // イベント送信用スレッド
+            r = smartmeter_transmitter(&sender, session_rejoin_period ,&mut serial_port) => r
+        };
+        //
+        if let Err(e) = result {
+            match e.downcast::<ReceiverTerminationError>() {
+                Ok(ReceiverTerminationError::PanaSessionExpired) => continue,
+                Ok(ReceiverTerminationError::PanaSessionTerminated) => continue,
+                Ok(ReceiverTerminationError::Io(e)) => return Err(anyhow!(e)),
+                Err(e) => return Err(anyhow!(e)),
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
     }
 }
 
