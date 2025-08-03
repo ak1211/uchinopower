@@ -91,19 +91,27 @@ async fn commit_to_database<'a>(
                 match SM::Properties::try_from(v.clone()) {
                     // 0xe2 積算電力量計測値履歴1 (正方向計測値)
                     Ok(SM::Properties::HistoricalCumlativeAmount(hist)) => {
-                        let _ = commit_historical_cumlative_amount(&pool, unit, &hist).await?;
+                        commit_historical_cumlative_amount(&pool, unit, &hist)
+                            .await
+                            .ok();
                     }
                     // 0xe7 瞬時電力計測値
                     Ok(SM::Properties::InstantiousPower(epower)) => {
-                        let _ = commit_instant_epower(&pool, &recorded_at, &epower).await?;
+                        commit_instant_epower(&pool, &recorded_at, &epower)
+                            .await
+                            .ok();
                     }
                     // 0xe8 瞬時電流計測値
                     Ok(SM::Properties::InstantiousCurrent(current)) => {
-                        let _ = commit_instant_current(&pool, &recorded_at, &current).await?;
+                        commit_instant_current(&pool, &recorded_at, &current)
+                            .await
+                            .ok();
                     }
                     // 0xea 定時積算電力量計測値(正方向計測値)
                     Ok(SM::Properties::CumlativeAmountsOfPowerAtFixedTime(epower)) => {
-                        let _ = commit_cumlative_amount_epower(&pool, unit, &epower).await?;
+                        commit_cumlative_amount_epower(&pool, unit, &epower)
+                            .await
+                            .ok();
                     }
                     //
                     _ => {}
@@ -116,7 +124,9 @@ async fn commit_to_database<'a>(
                 match SM::Properties::try_from(v.clone()) {
                     // 0xea 定時積算電力量計測値(正方向計測値)
                     Ok(SM::Properties::CumlativeAmountsOfPowerAtFixedTime(epower)) => {
-                        let _ = commit_cumlative_amount_epower(&pool, unit, &epower).await?;
+                        commit_cumlative_amount_epower(&pool, unit, &epower)
+                            .await
+                            .ok();
                     }
                     //
                     _ => {}
@@ -171,9 +181,7 @@ async fn rx_erxudp(
             }
             tracing::info!("{}", s.join(" "));
         }
-        Err(e) => {
-            tracing::trace!("{}", e);
-        }
+        Err(e) => tracing::trace!("{e}"),
     }
     Ok(())
 }
@@ -186,6 +194,8 @@ enum ReceiverTerminationError {
     PanaSessionExpired,
     #[error("PANA session terminated")]
     PanaSessionTerminated,
+    #[error("PANA session establishment failure")]
+    PanaSessionEstablishmentFail,
 }
 
 #[tracing::instrument(skip_all)]
@@ -198,26 +208,22 @@ async fn smartmeter_receiver(
     loop {
         match skstack::receive(serial_port_reader) {
             Ok(skstack::SkRxD::Void) => {}
-            Ok(r @ skstack::SkRxD::Ok) => {
-                tracing::trace!("{:?}", r);
-            }
-            Ok(r @ skstack::SkRxD::Fail(_)) => {
-                tracing::trace!("{:?}", r);
-            }
-            Ok(skstack::SkRxD::Event(ev)) => match ev.code {
+            Ok(r @ skstack::SkRxD::Ok) => tracing::trace!("{r:?}"),
+            Ok(r @ skstack::SkRxD::Fail(_)) => tracing::trace!("{r:?}"),
+            Ok(skstack::SkRxD::Event(event)) => match event.code {
                 0x01 => tracing::trace!("NS を受信した"),
                 0x02 => tracing::trace!("NA を受信した"),
                 0x05 => tracing::trace!("Echo Request を受信した"),
                 0x1f => tracing::trace!("ED スキャンが完了した"),
                 0x20 => tracing::trace!("Beacon を受信した"),
-                0x21 if Some(0) == ev.param => tracing::trace!("UDP の送信に成功"),
-                0x21 if Some(1) == ev.param => tracing::trace!("UDP の送信に失敗"),
+                0x21 if Some(0) == event.param => tracing::trace!("UDP の送信に成功"),
+                0x21 if Some(1) == event.param => tracing::trace!("UDP の送信に失敗"),
                 0x22 => tracing::trace!("アクティブスキャンが完了した"),
                 0x24 => {
                     tracing::trace!(
                         "PANA による接続過程でエラーが発生した（接続が完了しなかった）"
                     );
-                    bail!(ReceiverTerminationError::PanaSessionTerminated)
+                    bail!(ReceiverTerminationError::PanaSessionEstablishmentFail)
                 }
                 0x25 => tracing::trace!("PANA による接続が完了した"),
                 0x26 => tracing::trace!("接続相手からセッション終了要求を受信した"),
@@ -237,14 +243,10 @@ async fn smartmeter_receiver(
                 }
                 0x32 => tracing::trace!("ARIB108 の送信総和時間の制限が発動した"),
                 0x33 => tracing::trace!("送信総和時間の制限が解除された"),
-                _ => tracing::trace!("{:?}", ev),
+                _ => tracing::trace!("{event:?}"),
             },
-            Ok(r @ skstack::SkRxD::Epandesc(_)) => {
-                tracing::trace!("{:?}", r);
-            }
-            Ok(skstack::SkRxD::Erxudp(erxudp)) => {
-                rx_erxudp(pool, unit, erxudp).await?;
-            }
+            Ok(r @ skstack::SkRxD::Epandesc(_)) => tracing::trace!("{r:?}"),
+            Ok(skstack::SkRxD::Erxudp(erxudp)) => rx_erxudp(pool, unit, erxudp).await?,
             Err(e) if e.kind() == io::ErrorKind::TimedOut => {} // タイムアウトエラーは無視する
             Err(e) => bail!(ReceiverTerminationError::Io(e)),
         }
@@ -278,7 +280,7 @@ async fn smartmeter_transmitter<T: io::Write + Send>(
         let now = Instant::now();
         if now >= rejoin_time {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            skstack::send(serial_port, b"SKREJOIN\r\n").context("write failed!")?;
+            skstack::send(serial_port, b"SKREJOIN\r\n").map_err(anyhow::Error::from)?;
             rejoin_time = now + session_rejoin_period;
         }
     }
@@ -487,7 +489,7 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
         )?;
         // 追加コマンド発行
         for command in custom_commands.iter() {
-            skstack::send(&mut serial_port, command.as_bytes()).context("write failed!")?;
+            skstack::send(&mut serial_port, command.as_bytes()).map_err(anyhow::Error::from)?;
             if let skstack::SkRxD::Fail(code) = skstack::receive(&mut serial_port_reader)? {
                 bail!("\"{}\" コマンド実行に失敗しました。 ER{}", command, code);
             }
@@ -504,16 +506,22 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
             match e.downcast::<ReceiverTerminationError>() {
                 Ok(ReceiverTerminationError::PanaSessionExpired) => continue,
                 Ok(ReceiverTerminationError::PanaSessionTerminated) => continue,
+                Ok(ReceiverTerminationError::PanaSessionEstablishmentFail) => {
+                    tokio::time::sleep(Duration::from_secs(100)).await;
+                    continue;
+                }
                 Ok(ReceiverTerminationError::Io(e)) => return Err(anyhow!(e)),
                 Err(e) => return Err(anyhow!(e)),
             }
         }
-        tokio::time::sleep(Duration::from_secs(10)).await;
     }
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    const PKG_NAME: &'static str = env!("CARGO_PKG_NAME");
+    const PKG_VERSION: &'static str = env!("CARGO_PKG_VERSION");
+    //
     let file_appender = tracing_appender::rolling::daily("/var/log", "uchino_daqd.log");
     let subscriber = FmtSubscriber::builder()
         .with_max_level(tracing::Level::TRACE)
@@ -539,16 +547,20 @@ async fn main() -> ExitCode {
             .user("nobody")
             .group("dialout");
         daemonize.start()?;
+        println!("{PKG_NAME} / {PKG_VERSION} daemon started.");
+        tracing::info!("{PKG_NAME} / {PKG_VERSION} daemon started.");
         exec_data_acquisition(&serial_device, &database_url).await
     };
 
     match launcher().await {
         Ok(()) => {
-            tracing::info!("exit");
+            println!("{PKG_NAME} / {PKG_VERSION} daemon exited.");
+            tracing::info!("{PKG_NAME} / {PKG_VERSION} daemon exited.");
             ExitCode::SUCCESS
         }
         Err(e) => {
-            tracing::error!("{}", e);
+            eprintln!("{PKG_NAME} / {PKG_VERSION} daemon aborted, reason: {e}");
+            tracing::error!("{PKG_NAME} / {PKG_VERSION} daemon aborted, reason: {e}");
             ExitCode::FAILURE
         }
     }

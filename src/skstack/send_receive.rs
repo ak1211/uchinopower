@@ -6,7 +6,6 @@ use crate::{
     echonetlite::EchonetliteFrame,
     skstack::{SkRxD, parser},
 };
-use anyhow::Context;
 use std::io::{self, BufRead, BufReader};
 use std::net::Ipv6Addr;
 
@@ -57,5 +56,5 @@ pub fn send_echonetlite(
         payload.len(),
     );
     let command = [sksendto.as_bytes(), &payload].concat();
-    send(w, &command).context("write failed!")
+    send(w, &command).map_err(anyhow::Error::from)
 }
