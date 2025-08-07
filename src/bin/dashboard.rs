@@ -98,7 +98,7 @@ impl App {
         while !self.should_quit {
             tokio::select! {
                 _ = interval.tick() => { terminal.draw(|frame| self.draw(frame))?; },
-                _= fetch_interval.tick() => self.fetch_data().await.unwrap_or_default(),
+                _ = fetch_interval.tick() => self.fetch_data().await.unwrap_or_default(),
                 Some(Ok(event)) = events.next() => self.handle_event(&event),
             }
         }
@@ -206,17 +206,14 @@ fn instantious_watt_chart(now: DateTime<Utc>, iw: &[InstantWatt]) -> BarChart {
     let bars: Vec<Bar> = iw
         .iter()
         .map(|a| {
-            let dt = a.recorded_at - now;
+            let diff_minutes = (now - a.recorded_at).num_seconds() as f64 / 60.0;
             let value: u32 = a.watt.try_into().unwrap();
             let (r, g, b) = hsv::hsv_to_rgb(60.0, 1.0, 1.0 - f64::from(value) / 5000.0);
             let style = Style::new().fg(Color::Rgb(r, g, b));
             //
             Bar::default()
                 .value(value as u64)
-                .label(Line::from(format!(
-                    "{}m",
-                    (dt.num_seconds() as f64 / 60.0).floor()
-                )))
+                .label(Line::from(format!("{}m", 0.0 - diff_minutes.floor())))
                 .text_value(format!("{value:>3}"))
                 .style(style)
                 .value_style(style.reversed())
@@ -234,17 +231,14 @@ fn cumlative_amount_epower_chart(now: DateTime<Utc>, kwh: &[CumlativeKiloWattHou
     let bars: Vec<Bar> = kwh
         .iter()
         .map(|a| {
-            let dt = a.recorded_at - now;
+            let diff_minutes = (now - a.recorded_at).num_seconds() as f64 / 60.0;
             let value: f64 = a.kwh.try_into().unwrap();
             let (r, g, b) = hsv::hsv_to_rgb(180.0, 1.0, 1.0 - value / 99999.0);
             let style = Style::new().fg(Color::Rgb(r, g, b));
             //
             Bar::default()
                 .value((a.kwh * Decimal::from(100)).try_into().unwrap())
-                .label(Line::from(format!(
-                    "{}m",
-                    (dt.num_seconds() as f64 / 60.0).floor()
-                )))
+                .label(Line::from(format!("{}m", 0.0 - diff_minutes.floor())))
                 .text_value(format!("{value}"))
                 .style(style)
                 .value_style(style.reversed())
