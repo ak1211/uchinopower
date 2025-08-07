@@ -18,6 +18,7 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio;
+use tokio::sync::mpsc;
 use tracing_appender;
 use tracing_subscriber::FmtSubscriber;
 use uchinoepower::connection_settings::ConnectionSettings;
@@ -181,78 +182,9 @@ async fn rx_erxudp(
             }
             tracing::info!("{}", s.join(" "));
         }
-        Err(e) => tracing::trace!("{e}"),
+        Err(e) => tracing::error!("{e}"),
     }
     Ok(())
-}
-
-#[derive(Debug, thiserror::Error)]
-enum ReceiverTerminationError {
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("PANA session expired")]
-    PanaSessionExpired,
-    #[error("PANA session terminated")]
-    PanaSessionTerminated,
-    #[error("PANA session establishment failure")]
-    PanaSessionEstablishmentFail,
-}
-
-#[tracing::instrument(skip_all)]
-/// 受信
-async fn smartmeter_receiver(
-    pool: &PgPool,
-    unit: &SM::UnitForCumlativeAmountsPower,
-    serial_port_reader: &mut io::BufReader<dyn io::Read + Send>,
-) -> anyhow::Result<()> {
-    loop {
-        match skstack::receive(serial_port_reader) {
-            Ok(skstack::SkRxD::Void) => {}
-            Ok(r @ skstack::SkRxD::Ok) => tracing::trace!("{r:?}"),
-            Ok(r @ skstack::SkRxD::Fail(_)) => tracing::trace!("{r:?}"),
-            Ok(skstack::SkRxD::Event(event)) => match event.code {
-                0x01 => tracing::trace!("NS を受信した"),
-                0x02 => tracing::trace!("NA を受信した"),
-                0x05 => tracing::trace!("Echo Request を受信した"),
-                0x1f => tracing::trace!("ED スキャンが完了した"),
-                0x20 => tracing::trace!("Beacon を受信した"),
-                0x21 if Some(0) == event.param => tracing::trace!("UDP の送信に成功"),
-                0x21 if Some(1) == event.param => tracing::trace!("UDP の送信に失敗"),
-                0x22 => tracing::trace!("アクティブスキャンが完了した"),
-                0x24 => {
-                    tracing::trace!(
-                        "PANA による接続過程でエラーが発生した（接続が完了しなかった）"
-                    );
-                    bail!(ReceiverTerminationError::PanaSessionEstablishmentFail)
-                }
-                0x25 => tracing::trace!("PANA による接続が完了した"),
-                0x26 => tracing::trace!("接続相手からセッション終了要求を受信した"),
-                0x27 => {
-                    tracing::trace!("PANA セッションの終了に成功した");
-                    bail!(ReceiverTerminationError::PanaSessionTerminated)
-                }
-                0x28 => {
-                    tracing::trace!(
-                        "PANA セッションの終了要求に対する応答がなくタイムアウトした（セッションは終了）"
-                    );
-                    bail!(ReceiverTerminationError::PanaSessionTerminated)
-                }
-                0x29 => {
-                    tracing::trace!("セッションのライフタイムが経過して期限切れになった");
-                    bail!(ReceiverTerminationError::PanaSessionExpired);
-                }
-                0x32 => tracing::trace!("ARIB108 の送信総和時間の制限が発動した"),
-                0x33 => tracing::trace!("送信総和時間の制限が解除された"),
-                _ => tracing::trace!("{event:?}"),
-            },
-            Ok(r @ skstack::SkRxD::Epandesc(_)) => tracing::trace!("{r:?}"),
-            Ok(skstack::SkRxD::Erxudp(erxudp)) => rx_erxudp(pool, unit, erxudp).await?,
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => {} // タイムアウトエラーは無視する
-            Err(e) => bail!(ReceiverTerminationError::Io(e)),
-        }
-        // 制御を他のタスクに譲る
-        tokio::task::yield_now().await;
-    }
 }
 
 #[tracing::instrument(skip_all)]
@@ -298,11 +230,7 @@ async fn read_settings(pool: &PgPool) -> anyhow::Result<ConnectionSettings> {
 
     let row = sqlx::query_as!(
         Row,
-        r#"
-SELECT id, note as "note: sqlx::types::Json<ConnectionSettings>"
-FROM settings
-ORDER BY id DESC
-        "#
+        r#"SELECT id, note as "note: sqlx::types::Json<ConnectionSettings>" FROM settings ORDER BY id DESC"#
     )
     .fetch_one(pool)
     .await?;
@@ -317,11 +245,7 @@ async fn commit_instant_epower(
     epower: &SM::InstantiousPower,
 ) -> anyhow::Result<i64> {
     let rec = sqlx::query!(
-        r#"
-INSERT INTO instant_epower ( recorded_at, watt )
-VALUES ( $1, $2 )
-RETURNING id
-        "#,
+        r#"INSERT INTO instant_epower ( recorded_at, watt ) VALUES ( $1, $2 ) RETURNING id"#,
         *recorded_at,
         epower.0
     )
@@ -338,11 +262,7 @@ async fn commit_instant_current(
     current: &SM::InstantiousCurrent,
 ) -> anyhow::Result<i64> {
     let rec = sqlx::query!(
-        r#"
-INSERT INTO instant_current ( recorded_at, r, t )
-VALUES ( $1, $2, $3 )
-RETURNING id
-        "#,
+        r#"INSERT INTO instant_current ( recorded_at, r, t ) VALUES ( $1, $2, $3 ) RETURNING id"#,
         *recorded_at,
         current.r,
         current.t
@@ -372,11 +292,7 @@ async fn commit_cumlative_amount_epower(
         .context("time calcutate error")?;
     let kwh = Decimal::from(epower.cumlative_amounts_power) * unit.0;
     let rec = sqlx::query!(
-        r#"
-INSERT INTO cumlative_amount_epower ( recorded_at, kwh )
-VALUES ( $1, $2 )
-RETURNING id
-        "#,
+        r#"INSERT INTO cumlative_amount_epower ( recorded_at, kwh ) VALUES ( $1, $2 ) RETURNING id"#,
         jst.with_timezone(&Utc),
         kwh
     )
@@ -426,7 +342,7 @@ async fn commit_historical_cumlative_amount(
         .collect::<Vec<(DateTime<Utc>, Decimal)>>();
     //
     let mut query_builder =
-        QueryBuilder::new("INSERT INTO cumlative_amount_epower ( recorded_at, kwh ) ");
+        QueryBuilder::new(r#"INSERT INTO cumlative_amount_epower (recorded_at, kwh)"#);
 
     query_builder.push_values(histrical_kwh, |mut b, value| {
         b.push_bind(value.0).push_bind(value.1);
@@ -477,44 +393,93 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
         format!("SKSREG S16 {:X}\r\n", SESSION_LIFETIME_OF_SECOND), // PANA セッションライフタイム値
     ];
 
-    loop {
-        // スマートメーターと接続する
-        authn::connect(
-            &mut serial_port_reader,
-            &mut serial_port,
-            &credentials,
-            &sender,
-            settings.Channel,
-            settings.PanId,
-        )?;
-        // 追加コマンド発行
-        for command in custom_commands.iter() {
-            skstack::send(&mut serial_port, command.as_bytes()).map_err(anyhow::Error::from)?;
-            if let skstack::SkRxD::Fail(code) = skstack::receive(&mut serial_port_reader)? {
-                bail!("\"{}\" コマンド実行に失敗しました。 ER{}", command, code);
-            }
+    // スマートメーターと接続する
+    authn::connect(
+        &mut serial_port_reader,
+        &mut serial_port,
+        &credentials,
+        &sender,
+        settings.Channel,
+        settings.PanId,
+    )?;
+    // 追加コマンド発行
+    for command in custom_commands.iter() {
+        skstack::send(&mut serial_port, command.as_bytes()).map_err(anyhow::Error::from)?;
+        if let skstack::SkRxD::Fail(code) = skstack::receive(&mut serial_port_reader)? {
+            bail!("\"{}\" コマンド実行に失敗しました。 ER{}", command, code);
         }
-        //
-        let result = tokio::select! {
-            // イベント受信用スレッド
-            r = smartmeter_receiver(&pool, &settings.Unit, &mut serial_port_reader) => r,
-            // イベント送信用スレッド
-            r = smartmeter_transmitter(&sender, session_rejoin_period ,&mut serial_port) => r
-        };
-        //
-        if let Err(e) = result {
-            match e.downcast::<ReceiverTerminationError>() {
-                Ok(ReceiverTerminationError::PanaSessionExpired) => continue,
-                Ok(ReceiverTerminationError::PanaSessionTerminated) => continue,
-                Ok(ReceiverTerminationError::PanaSessionEstablishmentFail) => {
-                    tokio::time::sleep(Duration::from_secs(100)).await;
-                    continue;
+    }
+
+    //
+    let (tx_message, mut rx_message) = mpsc::channel::<io::Result<skstack::SkRxD>>(1);
+
+    // イベント受信用スレッド
+    tokio::spawn(async move {
+        tx_message
+            .send(skstack::receive(&mut serial_port_reader))
+            .await
+    });
+
+    // イベント送信用スレッド
+    tokio::spawn(async move {
+        smartmeter_transmitter(&sender, session_rejoin_period, &mut serial_port).await
+    });
+
+    //
+    'rx_loop: while let Some(rx) = rx_message.recv().await {
+        match rx {
+            Ok(skstack::SkRxD::Void) => {}
+            Ok(r @ skstack::SkRxD::Ok) => tracing::trace!("{r:?}"),
+            Ok(r @ skstack::SkRxD::Fail(_)) => {
+                tracing::error!("コマンド実行に失敗した。{r:?}");
+                bail!("コマンド実行に失敗した。{r:?}");
+            }
+            Ok(skstack::SkRxD::Event(event)) => match event.code {
+                0x01 => tracing::trace!("NS を受信した"),
+                0x02 => tracing::trace!("NA を受信した"),
+                0x05 => tracing::trace!("Echo Request を受信した"),
+                0x1f => tracing::trace!("ED スキャンが完了した"),
+                0x20 => tracing::trace!("Beacon を受信した"),
+                0x21 if Some(0) == event.param => tracing::trace!("UDP の送信に成功"),
+                0x21 if Some(1) == event.param => tracing::trace!("UDP の送信に失敗"),
+                0x22 => tracing::trace!("アクティブスキャンが完了した"),
+                0x24 => {
+                    tracing::trace!(
+                        "PANA による接続過程でエラーが発生した（接続が完了しなかった）"
+                    );
+                    break 'rx_loop;
                 }
-                Ok(ReceiverTerminationError::Io(e)) => return Err(anyhow!(e)),
-                Err(e) => return Err(anyhow!(e)),
+                0x25 => tracing::trace!("PANA による接続が完了した"),
+                0x26 => tracing::trace!("接続相手からセッション終了要求を受信した"),
+                0x27 => {
+                    tracing::trace!("PANA セッションの終了に成功した");
+                    break 'rx_loop;
+                }
+                0x28 => {
+                    tracing::trace!(
+                        "PANA セッションの終了要求に対する応答がなくタイムアウトした（セッションは終了）"
+                    );
+                    break 'rx_loop;
+                }
+                0x29 => {
+                    tracing::trace!("セッションのライフタイムが経過して期限切れになった");
+                    break 'rx_loop;
+                }
+                0x32 => tracing::trace!("ARIB108 の送信総和時間の制限が発動した"),
+                0x33 => tracing::trace!("送信総和時間の制限が解除された"),
+                _ => tracing::trace!("{event:?}"),
+            },
+            Ok(r @ skstack::SkRxD::Epandesc(_)) => tracing::trace!("{r:?}"),
+            Ok(skstack::SkRxD::Erxudp(erxudp)) => rx_erxudp(&pool, &settings.Unit, erxudp).await?,
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {} // タイムアウトエラーは無視する
+            Err(e) => {
+                // IOエラーの場合は何もできない。
+                tracing::trace!("IOエラー:{e}");
+                bail!(e);
             }
         }
     }
+    Ok(())
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -549,7 +514,9 @@ async fn main() -> ExitCode {
         daemonize.start()?;
         println!("{PKG_NAME} / {PKG_VERSION} daemon started.");
         tracing::info!("{PKG_NAME} / {PKG_VERSION} daemon started.");
-        exec_data_acquisition(&serial_device, &database_url).await
+        loop {
+            exec_data_acquisition(&serial_device, &database_url).await?
+        }
     };
 
     match launcher().await {
