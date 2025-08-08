@@ -6,7 +6,7 @@ use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Datelike, Days, TimeDelta, TimeZone, Timelike, Utc};
 use chrono_tz::Asia;
 use cron::Schedule;
-use daemonize::Daemonize;
+use daemonize::{self, Daemonize};
 use rust_decimal::Decimal;
 use serialport::{DataBits, SerialPort, StopBits};
 use sqlx::{self, QueryBuilder, postgres::PgPool};
@@ -417,7 +417,7 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
     //
     let (tx_message, mut rx_message) = mpsc::channel::<io::Result<skstack::SkRxD>>(1);
 
-    // イベント受信用スレッド
+    // スマートメーター受信用スレッド
     tokio::spawn(async move {
         while let Ok(()) = tx_message
             .send(skstack::receive(&mut serial_port_reader))
@@ -427,12 +427,12 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
         }
     });
 
-    // イベント送信用スレッド
+    // スマートメーター送信用スレッド
     tokio::spawn(async move {
         smartmeter_transmitter(&sender, session_rejoin_period, &mut serial_port).await
     });
 
-    //
+    // スマートメーター受信
     'rx_loop: while let Some(rx) = rx_message.recv().await {
         match rx {
             Ok(skstack::SkRxD::Void) => {}
@@ -524,6 +524,8 @@ async fn main() -> ExitCode {
             .pid_file("/run/uchino_daqd.pid")
             .working_directory("/tmp")
             .user("nobody")
+            .stderr(daemonize::Stdio::keep())
+            .stdout(daemonize::Stdio::keep())
             .group("dialout");
         daemonize.start()?;
         println!("{app_info} started.");
