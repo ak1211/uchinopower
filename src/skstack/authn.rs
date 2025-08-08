@@ -6,6 +6,8 @@ use crate::skstack;
 use anyhow::{Context, bail};
 use std::io;
 use std::net::Ipv6Addr;
+use std::thread;
+use std::time::Duration;
 
 #[derive(PartialEq, Eq)]
 /// 認証情報
@@ -78,8 +80,13 @@ pub fn connect(
     // コマンド発行
     for command in connect_sequence.iter() {
         skstack::send(writer, command.as_bytes()).context("write failed!")?;
+        thread::sleep(Duration::from_millis(1));
         if let skstack::SkRxD::Fail(code) = skstack::receive(reader)? {
-            bail!("\"{}\" コマンド実行に失敗しました。 ER{}", command, code);
+            bail!(
+                "\"{}\" コマンド実行に失敗しました。 ER{}",
+                command.escape_debug(),
+                code
+            );
         }
     }
 

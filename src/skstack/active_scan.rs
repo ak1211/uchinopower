@@ -24,7 +24,11 @@ pub fn active_scan(
     for command in pairing_sequence.iter() {
         skstack::send(port_writer, command.as_bytes()).context("write failed!")?;
         if let skstack::SkRxD::Fail(code) = skstack::receive(port_reader)? {
-            bail!("\"{}\" コマンド実行に失敗しました。 ER{}", command, code);
+            bail!(
+                "\"{}\" コマンド実行に失敗しました。 ER{}",
+                command.escape_debug(),
+                code
+            );
         }
     }
 

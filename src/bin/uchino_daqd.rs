@@ -16,9 +16,9 @@ use std::net::Ipv6Addr;
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::LazyLock;
+use std::thread;
 use std::time::{Duration, Instant};
 use tokio;
-use tokio::sync::mpsc;
 use tracing_appender;
 use tracing_subscriber::FmtSubscriber;
 use uchinoepower::connection_settings::ConnectionSettings;
@@ -191,38 +191,6 @@ async fn rx_erxudp(
     Ok(())
 }
 
-#[tracing::instrument(skip_all)]
-/// 送信
-async fn smartmeter_transmitter<T: io::Write + Send>(
-    sender: &Ipv6Addr,
-    session_rejoin_period: Duration,
-    serial_port: &mut T,
-) -> anyhow::Result<()> {
-    // メッセージ送信(今日の積算電力量履歴)
-    skstack::send_echonetlite(serial_port, &sender, &TODAY_CWH)?;
-
-    let mut rejoin_time = Instant::now() + session_rejoin_period;
-
-    // スケジュールに則りメッセージ送信
-    let schedule = Schedule::from_str("00 */1 * * * *")?;
-    for next in schedule.upcoming(Asia::Tokyo) {
-        // 次回実行予定時刻まで待つ
-        let duration = (next.to_utc() - Utc::now()).to_std()?;
-        tracing::trace!("Next scheduled time. ({}), sleep ({:?})", next, duration);
-        tokio::time::sleep(duration).await;
-        // メッセージ送信(瞬時電力と瞬時電流計測値)
-        skstack::send_echonetlite(serial_port, &sender, &INSTANT_WATT_AMPERE)?;
-        // 再認証を要求する
-        let now = Instant::now();
-        if now >= rejoin_time {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            skstack::send(serial_port, b"SKREJOIN\r\n").map_err(anyhow::Error::from)?;
-            rejoin_time = now + session_rejoin_period;
-        }
-    }
-    Ok(())
-}
-
 /// 設定情報をデーターベースから得る
 async fn read_settings(pool: &PgPool) -> anyhow::Result<ConnectionSettings> {
     #[derive(sqlx::FromRow)]
@@ -358,6 +326,37 @@ async fn commit_historical_cumlative_amount(
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
+/// 送信
+async fn smartmeter_transmitter<T: io::Write + Send>(
+    sender: &Ipv6Addr,
+    session_rejoin_period: Duration,
+    serial_port: &mut T,
+) -> anyhow::Result<()> {
+    // メッセージ送信(今日の積算電力量履歴)
+    skstack::send_echonetlite(serial_port, &sender, &TODAY_CWH)?;
+
+    let mut rejoin_time = Instant::now() + session_rejoin_period;
+
+    // スケジュールに則りメッセージ送信
+    let schedule = Schedule::from_str("00 */1 * * * *")?;
+    for next in schedule.upcoming(Asia::Tokyo) {
+        // 次回実行予定時刻まで待つ
+        let duration = (next.to_utc() - Utc::now()).to_std()?;
+        tracing::trace!("Next scheduled time. ({}), sleep ({:?})", next, duration);
+        tokio::time::sleep(duration).await;
+        // メッセージ送信(瞬時電力と瞬時電流計測値)
+        skstack::send_echonetlite(serial_port, &sender, &INSTANT_WATT_AMPERE)?;
+        // 再認証を要求する
+        let now = Instant::now();
+        if now >= rejoin_time {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            skstack::send(serial_port, b"SKREJOIN\r\n").map_err(anyhow::Error::from)?;
+            rejoin_time = now + session_rejoin_period;
+        }
+    }
+    Ok(())
+}
 /// スマートメーターからデーターを収集する
 async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::Result<()> {
     let pool = PgPool::connect(database_url).await?;
@@ -409,23 +408,15 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
     // 追加コマンド発行
     for command in custom_commands.iter() {
         skstack::send(&mut serial_port, command.as_bytes()).map_err(anyhow::Error::from)?;
+        thread::sleep(Duration::from_millis(1));
         if let skstack::SkRxD::Fail(code) = skstack::receive(&mut serial_port_reader)? {
-            bail!("\"{}\" コマンド実行に失敗しました。 ER{}", command, code);
+            bail!(
+                "\"{}\" コマンド実行に失敗しました。 ER{}",
+                command.escape_debug(),
+                code
+            );
         }
     }
-
-    //
-    let (tx_message, mut rx_message) = mpsc::channel::<io::Result<skstack::SkRxD>>(1);
-
-    // スマートメーター受信用スレッド
-    tokio::spawn(async move {
-        while let Ok(()) = tx_message
-            .send(skstack::receive(&mut serial_port_reader))
-            .await
-        {
-            tokio::task::yield_now().await;
-        }
-    });
 
     // スマートメーター送信用スレッド
     tokio::spawn(async move {
@@ -433,8 +424,8 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
     });
 
     // スマートメーター受信
-    'rx_loop: while let Some(rx) = rx_message.recv().await {
-        match rx {
+    'rx_loop: loop {
+        match skstack::receive(&mut serial_port_reader) {
             Ok(skstack::SkRxD::Void) => {}
             Ok(r @ skstack::SkRxD::Ok) => tracing::trace!("{r:?}"),
             Ok(r @ skstack::SkRxD::Fail(_)) => {
@@ -485,6 +476,7 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
                 bail!(e);
             }
         }
+        tokio::task::yield_now().await;
     }
     Ok(())
 }
