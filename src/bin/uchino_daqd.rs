@@ -440,6 +440,9 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
                 0x20 => tracing::trace!("Beacon を受信した"),
                 0x21 if Some(0) == event.param => tracing::trace!("UDP の送信に成功"),
                 0x21 if Some(1) == event.param => tracing::trace!("UDP の送信に失敗"),
+                0x21 if Some(2) == event.param => {
+                    tracing::trace!("UDP を送信する代わりにアドレス要請を行った")
+                }
                 0x22 => tracing::trace!("アクティブスキャンが完了した"),
                 0x24 => {
                     tracing::trace!(
