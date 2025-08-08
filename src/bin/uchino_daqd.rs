@@ -27,6 +27,10 @@ use uchinoepower::echonetlite::{
 };
 use uchinoepower::skstack::{self, Erxudp, authn};
 
+mod built_info {
+    include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
+
 /// シリアルポートを開く
 fn open_port(port_name: &str) -> anyhow::Result<Box<dyn SerialPort>> {
     let builder = serialport::new(port_name, 115200)
@@ -415,9 +419,12 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
 
     // イベント受信用スレッド
     tokio::spawn(async move {
-        tx_message
+        while let Ok(()) = tx_message
             .send(skstack::receive(&mut serial_port_reader))
             .await
+        {
+            tokio::task::yield_now().await;
+        }
     });
 
     // イベント送信用スレッド
@@ -484,8 +491,15 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    const PKG_NAME: &'static str = env!("CARGO_PKG_NAME");
-    const PKG_VERSION: &'static str = env!("CARGO_PKG_VERSION");
+    let git_head_ref = built_info::GIT_HEAD_REF.unwrap_or_default();
+    let app_info = format!(
+        "{} / {}{} daemon",
+        built_info::PKG_NAME,
+        built_info::PKG_VERSION,
+        built_info::GIT_COMMIT_HASH_SHORT
+            .map(|s| format!(" ({s} - {git_head_ref})"))
+            .unwrap_or_default()
+    );
     //
     let file_appender = tracing_appender::rolling::daily("/var/log", "uchino_daqd.log");
     let subscriber = FmtSubscriber::builder()
@@ -512,8 +526,8 @@ async fn main() -> ExitCode {
             .user("nobody")
             .group("dialout");
         daemonize.start()?;
-        println!("{PKG_NAME} / {PKG_VERSION} daemon started.");
-        tracing::info!("{PKG_NAME} / {PKG_VERSION} daemon started.");
+        println!("{app_info} started.");
+        tracing::info!("{app_info} started.");
         loop {
             exec_data_acquisition(&serial_device, &database_url).await?
         }
@@ -521,13 +535,13 @@ async fn main() -> ExitCode {
 
     match launcher().await {
         Ok(()) => {
-            println!("{PKG_NAME} / {PKG_VERSION} daemon exited.");
-            tracing::info!("{PKG_NAME} / {PKG_VERSION} daemon exited.");
+            println!("{app_info} terminated.");
+            tracing::info!("{app_info} terminated.");
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("{PKG_NAME} / {PKG_VERSION} daemon aborted, reason: {e}");
-            tracing::error!("{PKG_NAME} / {PKG_VERSION} daemon aborted, reason: {e}");
+            eprintln!("{app_info} aborted, reason: {e}");
+            tracing::error!("{app_info} aborted, reason: {e}");
             ExitCode::FAILURE
         }
     }

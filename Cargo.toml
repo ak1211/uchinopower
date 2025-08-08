@@ -2,6 +2,10 @@
 name = "uchinoepower"
 version = "1.12.0"
 edition = "2024"
+build = "build.rs"
+
+[build-dependencies]
+built = { version = "0.8.0", features = ["git2"] }
 
 [dependencies]
 anyhow = "1.0.98"
