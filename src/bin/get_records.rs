@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sqlx::{self, postgres::PgPool};
 use std::env;
+use std::result;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -27,7 +28,9 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// 瞬時電力をデーターベースから得る
-async fn read_instant_epower(pool: &PgPool) -> anyhow::Result<Vec<(DateTime<Utc>, Decimal)>> {
+async fn read_instant_epower(
+    pool: &PgPool,
+) -> result::Result<Vec<(DateTime<Utc>, Decimal)>, sqlx::Error> {
     let recs = sqlx::query!(
         "SELECT recorded_at, watt FROM instant_epower ORDER BY recorded_at DESC LIMIT $1",
         100
@@ -41,7 +44,7 @@ async fn read_instant_epower(pool: &PgPool) -> anyhow::Result<Vec<(DateTime<Utc>
 /// 瞬時電力をデーターベースから得る
 async fn read_instant_current(
     pool: &PgPool,
-) -> anyhow::Result<Vec<(DateTime<Utc>, Decimal, Option<Decimal>)>> {
+) -> result::Result<Vec<(DateTime<Utc>, Decimal, Option<Decimal>)>, sqlx::Error> {
     let recs = sqlx::query!(
         "SELECT recorded_at, r, t FROM instant_current ORDER BY recorded_at DESC LIMIT $1",
         100
@@ -55,7 +58,7 @@ async fn read_instant_current(
 /// 定時積算電力量計測値(正方向計測値)をデーターベースに蓄積する
 async fn read_cumlative_amount_epower(
     pool: &PgPool,
-) -> anyhow::Result<Vec<(DateTime<Utc>, Decimal)>> {
+) -> result::Result<Vec<(DateTime<Utc>, Decimal)>, sqlx::Error> {
     let recs = sqlx::query!(
         "SELECT recorded_at, kwh FROM cumlative_amount_epower ORDER BY recorded_at DESC LIMIT $1",
         100
