@@ -1,5 +1,6 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
+use chrono_tz::Asia;
 use rust_decimal::Decimal;
 use sqlx::{self, postgres::PgPool};
 use std::env;
@@ -16,13 +17,31 @@ async fn main() -> anyhow::Result<()> {
 
     //
     let xs = read_instant_epower(&pool).await?;
-    println!("{:?}", xs);
+    println!("time, instantious electric power(W)");
+    for (at, power) in xs.iter() {
+        let t = at.with_timezone(&Asia::Tokyo).to_rfc3339();
+        println!("{t}, {power}");
+    }
+    println!("");
 
     let xs = read_instant_current(&pool).await?;
-    println!("{:?}", xs);
+    println!("time, instantious current R(A), T(A)");
+    for (at, ir, it) in xs.iter() {
+        let t = at.with_timezone(&Asia::Tokyo).to_rfc3339();
+        println!(
+            "{t}, {ir}{}",
+            it.map(|v| format!(", {v}")).unwrap_or_default()
+        );
+    }
+    println!("");
 
     let xs = read_cumlative_amount_epower(&pool).await?;
-    println!("{:?}", xs);
+    println!("time, cumlative amounts of power(kWh)");
+    for (at, power) in xs.iter() {
+        let t = at.with_timezone(&Asia::Tokyo).to_rfc3339();
+        println!("{t}, {power}");
+    }
+    println!("");
 
     Ok(())
 }
@@ -31,13 +50,14 @@ async fn main() -> anyhow::Result<()> {
 async fn read_instant_epower(
     pool: &PgPool,
 ) -> result::Result<Vec<(DateTime<Utc>, Decimal)>, sqlx::Error> {
-    let recs = sqlx::query!(
+    let mut recs = sqlx::query!(
         "SELECT recorded_at, watt FROM instant_epower ORDER BY recorded_at DESC LIMIT $1",
         100
     )
     .fetch_all(pool)
     .await?;
 
+    recs.reverse();
     Ok(recs.iter().map(|a| (a.recorded_at, a.watt)).collect())
 }
 
@@ -45,13 +65,14 @@ async fn read_instant_epower(
 async fn read_instant_current(
     pool: &PgPool,
 ) -> result::Result<Vec<(DateTime<Utc>, Decimal, Option<Decimal>)>, sqlx::Error> {
-    let recs = sqlx::query!(
+    let mut recs = sqlx::query!(
         "SELECT recorded_at, r, t FROM instant_current ORDER BY recorded_at DESC LIMIT $1",
         100
     )
     .fetch_all(pool)
     .await?;
 
+    recs.reverse();
     Ok(recs.iter().map(|a| (a.recorded_at, a.r, a.t)).collect())
 }
 
@@ -59,12 +80,13 @@ async fn read_instant_current(
 async fn read_cumlative_amount_epower(
     pool: &PgPool,
 ) -> result::Result<Vec<(DateTime<Utc>, Decimal)>, sqlx::Error> {
-    let recs = sqlx::query!(
+    let mut recs = sqlx::query!(
         "SELECT recorded_at, kwh FROM cumlative_amount_epower ORDER BY recorded_at DESC LIMIT $1",
         100
     )
     .fetch_all(pool)
     .await?;
 
+    recs.reverse();
     Ok(recs.iter().map(|a| (a.recorded_at, a.kwh)).collect())
 }
