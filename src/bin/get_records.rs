@@ -1,3 +1,7 @@
+// データーベースから測定値を得る。
+// SPDX-License-Identifier: MPL-2.0
+// SPDX-FileCopyrightText: 2025 Akihiro Yamamoto <github.com/ak1211>
+//
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use chrono_tz::Asia;
