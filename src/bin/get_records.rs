@@ -65,7 +65,7 @@ async fn read_instant_epower(
     Ok(recs.iter().map(|a| (a.recorded_at, a.watt)).collect())
 }
 
-/// 瞬時電力をデーターベースから得る
+/// 瞬時電流をデーターベースから得る
 async fn read_instant_current(
     pool: &PgPool,
 ) -> result::Result<Vec<(DateTime<Utc>, Decimal, Option<Decimal>)>, sqlx::Error> {
@@ -80,7 +80,7 @@ async fn read_instant_current(
     Ok(recs.iter().map(|a| (a.recorded_at, a.r, a.t)).collect())
 }
 
-/// 定時積算電力量計測値(正方向計測値)をデーターベースに蓄積する
+/// 定時積算電力量計測値(正方向計測値)をデーターベースから得る
 async fn read_cumlative_amount_epower(
     pool: &PgPool,
 ) -> result::Result<Vec<(DateTime<Utc>, Decimal)>, sqlx::Error> {
