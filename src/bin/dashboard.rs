@@ -33,7 +33,7 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _ = dotenv::dotenv();
+    dotenv::dotenv().ok();
     let database_url = env::var("DATABASE_URL").wrap_err("Must be set to DATABASE_URL")?;
     let pool = PgPool::connect(&database_url).await?;
     color_eyre::install()?;
