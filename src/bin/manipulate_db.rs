@@ -95,18 +95,29 @@ async fn exec_unique_record(pool: &PgPool, args: &UniqueArgs) -> anyhow::Result<
         //
         let transaction = pool.begin().await.context("transaction error")?;
         //
-        let mut counter = 0;
-        for id in delete_id {
-            sqlx::query("DELETE FROM cumlative_amount_epower WHERE id = $1")
-                .bind(id)
-                .execute(pool)
-                .await?;
-            println!("id: {} has been deleted.", id);
-            counter = counter + 1;
+        let do_delete = async || -> anyhow::Result<i32> {
+            let mut counter = 0;
+            for id in delete_id {
+                sqlx::query("DELETE FROM cumlative_amount_epower WHERE id = $1")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                println!("id: {} has been deleted.", id);
+                counter = counter + 1;
+            }
+            Ok(counter)
+        };
+        match do_delete().await {
+            Ok(counter) => {
+                transaction.commit().await.context("commit failure")?;
+                println!("Total {} records deleted.", counter);
+            }
+            Err(e) => {
+                transaction.rollback().await.context("rollback failure")?;
+                println!("Error: {}", e);
+            }
         }
-        println!("Total {} records deleted.", counter);
         //
-        transaction.commit().await.context("commit failure")?;
     }
 
     Ok(())
