@@ -82,7 +82,12 @@ async fn exec_unique_record(pool: &PgPool, args: &UniqueArgs) -> anyhow::Result<
 
     let mut unique_record: Measure = Default::default();
     while let Some(row) = rows.try_next().await? {
-        print!("{}, {}, {}", row.id, row.recorded_at, row.kwh);
+        print!(
+            "{}, {}, {}",
+            row.id,
+            row.recorded_at.with_timezone(&Asia::Tokyo).to_rfc3339(),
+            row.kwh
+        );
         if unique_record.recorded_at == row.recorded_at && unique_record.kwh == row.kwh {
             print!(" **This record is same as id {}**", unique_record.id);
             delete_id.push(row.id);
