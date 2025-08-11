@@ -77,6 +77,48 @@ ls /dev
 
 すると USB 接続なら **/dev/ttyUSB0** などがある。
 
+### screen コマンドで試してみる(しなくてもいい)。
+
+```
+pi@raspberrypi:~ $ screen /dev/ttyUSB0 115200
+```
+
+SKINFO と入力してエンター
+
+```
+SKINFO
+EINFO FE80:0000:0000:0000:xxxx:xxxx:xxxx:xxxx xxxxxxxxxxxxxxxx xx xxxx xxxx
+OK
+```
+
+### screen コマンドの終了
+
+C-a k (Ctrl+a を押した後に k)
+そして y を入力。
+
+**/dev/ttyUSB0** が WiSUN モジュールだと確認できた。
+pi ユーザー(このユーザー)に権限がない場合は, 以下のように dialout グループに pi ユーザーを追加する。
+
+```
+pi@raspberrypi:~ $ ls -l /dev/ttyUSB0
+crw-rw---- 1 root dialout 188, 0 Aug 11 10:39 /dev/ttyUSB0
+```
+
+dialout グループに読み書き権限がある。
+
+```
+pi@raspberrypi:~ $ grep dialout /etc/group
+dialout:x:20:
+```
+
+dialout グループに pi ユーザーを入れる。
+
+```
+pi@raspberrypi:~ $ sudo usermod -aG dialout pi
+pi@raspberrypi:~ $ grep dialout /etc/group
+dialout:x:20:pi
+```
+
 WiSUN モジュールのデバイスは --device で指定する。
 
 ### スマートメーターをアクティブスキャンで探す。(pairing)
@@ -402,7 +444,7 @@ sudo nvim /etc/systemd/system/uchinopower.service
 ```
 [Unit]
 Description=data acquisition from smartmeter route-B
-After=syslog.target network.target postgresql.service
+After=syslog.target network.target
 
 [Service]
 Type=forking
@@ -416,6 +458,20 @@ Environment=DATABASE_URL=postgres://postgres:raspberry@localhost:5432/uchinopowe
 
 [Install]
 WantedBy=multi-user.target
+```
+
+お好みで
+
+```
+Environment=RUST_LOG=trace
+```
+
+などを加えてもいいですね。
+
+### service ファイルを再読み込みする
+
+```
+pi@raspberrypi:~ $ sudo systemctl daemon-reload
 ```
 
 ### 起動

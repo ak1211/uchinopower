@@ -518,10 +518,10 @@ async fn main() -> ExitCode {
         let daemonize = Daemonize::new()
             .pid_file("/run/uchino_daqd.pid")
             .working_directory("/tmp")
-            .user("nobody")
+            .user("daemon")
+            .group("dialout")
             .stderr(daemonize::Stdio::keep())
-            .stdout(daemonize::Stdio::keep())
-            .group("dialout");
+            .stdout(daemonize::Stdio::keep());
         daemonize.start()?;
         println!("{app_info} started.");
         tracing::info!("{app_info} started.");

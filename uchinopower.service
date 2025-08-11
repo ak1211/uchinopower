@@ -1,6 +1,6 @@
 [Unit]
 Description=data acquisition from smartmeter route-B
-After=syslog.target network.target postgresql.service
+After=syslog.target network.target
 
 [Service]
 Type=forking
