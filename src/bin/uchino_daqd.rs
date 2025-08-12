@@ -486,6 +486,7 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    //
     let git_head_ref = built_info::GIT_HEAD_REF.unwrap_or_default();
     let app_info = format!(
         "{} / {}{} daemon",
@@ -496,20 +497,6 @@ async fn main() -> ExitCode {
             .unwrap_or_default()
     );
     //
-    let file_appender = tracing_appender::rolling::daily("/var/log", "uchino_daqd.log");
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(tracing::Level::TRACE)
-        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
-        .with_file(false)
-        .with_line_number(false)
-        .with_thread_names(true)
-        .with_thread_ids(true)
-        .with_ansi(false)
-        .with_writer(file_appender)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-
     let launcher = async || -> anyhow::Result<()> {
         // 環境変数
         let serial_device = env::var("SERIAL_DEVICE").context("Must be set to SERIAL_DEVICE")?;
@@ -523,6 +510,23 @@ async fn main() -> ExitCode {
             .stderr(daemonize::Stdio::keep())
             .stdout(daemonize::Stdio::keep());
         daemonize.start()?;
+        // ここから子プロセス側で実行開始
+        let file_appender =
+            tracing_appender::rolling::daily("/var/log/uchinopower", "uchino_daqd.log");
+        let subscriber = FmtSubscriber::builder()
+            .with_max_level(tracing::Level::TRACE)
+            .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
+            .with_file(false)
+            .with_line_number(false)
+            .with_thread_names(true)
+            .with_thread_ids(true)
+            .with_ansi(false)
+            .with_writer(file_appender)
+            .finish();
+
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("setting default subscriber failed");
+
         println!("{app_info} started.");
         tracing::info!("{app_info} started.");
         loop {

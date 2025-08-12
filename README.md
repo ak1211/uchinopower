@@ -474,6 +474,12 @@ Environment=RUST_LOG=trace
 pi@raspberrypi:~ $ sudo systemctl daemon-reload
 ```
 
+### ログ書込みディレクトリを作る
+
+```
+pi@raspberrypi:~ $ sudo install -m 775 -o daemon -g daemon -d /var/log/uchinopower/
+```
+
 ### 起動
 
 ```
