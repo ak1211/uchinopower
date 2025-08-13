@@ -484,9 +484,8 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
     Ok(())
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> ExitCode {
-    //
+fn main() -> ExitCode {
+    // プログラムの情報
     let git_head_ref = built_info::GIT_HEAD_REF.unwrap_or_default();
     let app_info = format!(
         "{} / {}{} daemon",
@@ -496,54 +495,56 @@ async fn main() -> ExitCode {
             .map(|s| format!(" ({s} - {git_head_ref})"))
             .unwrap_or_default()
     );
-    //
-    let launcher = async || -> anyhow::Result<()> {
-        // 環境変数
-        let serial_device = env::var("SERIAL_DEVICE").context("Must be set to SERIAL_DEVICE")?;
-        let database_url = env::var("DATABASE_URL").context("Must be set to DATABASE_URL")?;
-
-        let daemonize = Daemonize::new()
-            .pid_file("/run/uchino_daqd.pid")
-            .working_directory("/tmp")
-            .user("daemon")
-            .group("dialout")
-            .stderr(daemonize::Stdio::keep())
-            .stdout(daemonize::Stdio::keep());
-        daemonize.start()?;
-        // ここから子プロセス側で実行開始
-        let file_appender =
-            tracing_appender::rolling::daily("/var/log/uchinopower", "uchino_daqd.log");
-        let subscriber = FmtSubscriber::builder()
-            .with_max_level(tracing::Level::TRACE)
-            .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
-            .with_file(false)
-            .with_line_number(false)
-            .with_thread_names(true)
-            .with_thread_ids(true)
-            .with_ansi(false)
-            .with_writer(file_appender)
-            .finish();
-
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("setting default subscriber failed");
-
-        println!("{app_info} started.");
-        tracing::info!("{app_info} started.");
-        loop {
-            exec_data_acquisition(&serial_device, &database_url).await?
-        }
-    };
-
-    match launcher().await {
-        Ok(()) => {
-            println!("{app_info} terminated.");
-            tracing::info!("{app_info} terminated.");
-            ExitCode::SUCCESS
-        }
+    // 環境変数
+    let serial_device = env::var("SERIAL_DEVICE").expect("Must be set to SERIAL_DEVICE");
+    let database_url = env::var("DATABASE_URL").expect("Must be set to DATABASE_URL");
+    // デーモンプロセスにする
+    let daemonize = Daemonize::new()
+        .pid_file("/run/uchino_daqd.pid")
+        .working_directory("/tmp")
+        .user("daemon")
+        .group("dialout")
+        .stderr(daemonize::Stdio::keep())
+        .stdout(daemonize::Stdio::keep());
+    match daemonize.start() {
         Err(e) => {
             eprintln!("{app_info} aborted, reason: {e}");
-            tracing::error!("{app_info} aborted, reason: {e}");
-            ExitCode::FAILURE
+            return ExitCode::FAILURE;
+        }
+        Ok(()) => {
+            // ここからデーモンプロセス始まり
+            let file_appender =
+                tracing_appender::rolling::daily("/var/log/uchinopower", "uchino_daqd.log");
+            let subscriber = FmtSubscriber::builder()
+                .with_max_level(tracing::Level::TRACE)
+                .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
+                .with_file(false)
+                .with_line_number(false)
+                .with_thread_names(true)
+                .with_thread_ids(true)
+                .with_ansi(false)
+                .with_writer(file_appender)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("setting default subscriber failed");
+            println!("{app_info} started.");
+            tracing::info!("{app_info} started.");
+            // メインループ
+            'infinite_loop: loop {
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Tokio runtime build error")
+                    .block_on(exec_data_acquisition(&serial_device, &database_url))
+                {
+                    Ok(()) => continue 'infinite_loop,
+                    Err(e) => {
+                        eprintln!("{app_info} aborted, reason: {e}");
+                        tracing::error!("{app_info} aborted, reason: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
         }
     }
 }
