@@ -148,7 +148,7 @@ async fn commit_to_database<'a>(
 async fn rx_erxudp(
     pool: &PgPool,
     unit: &SM::UnitForCumlativeAmountsPower,
-    erxudp: Erxudp,
+    erxudp: &Erxudp,
 ) -> anyhow::Result<()> {
     // 受信時刻(分単位)
     let recorded_at = {
@@ -186,7 +186,10 @@ async fn rx_erxudp(
             }
             tracing::info!("{}", s.join(" "));
         }
-        Err(e) => tracing::error!("{e}"),
+        Err(e) => {
+            let str_msg = erxudp.data.escape_ascii().to_string();
+            tracing::trace!(r#"Arrival udp payload "{str_msg}" is IGNORED, reason:{e}"#);
+        }
     }
     Ok(())
 }
@@ -471,7 +474,7 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
                 _ => tracing::trace!("{event:?}"),
             },
             Ok(r @ skstack::SkRxD::Epandesc(_)) => tracing::trace!("{r:?}"),
-            Ok(skstack::SkRxD::Erxudp(erxudp)) => rx_erxudp(&pool, &settings.Unit, erxudp).await?,
+            Ok(skstack::SkRxD::Erxudp(erxudp)) => rx_erxudp(&pool, &settings.Unit, &erxudp).await?,
             Err(e) if e.kind() == io::ErrorKind::TimedOut => {} // タイムアウトエラーは無視する
             Err(e) => {
                 // IOエラーの場合は何もできない。
