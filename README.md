@@ -678,16 +678,30 @@ select * from instant_epower order by recorded_at desc;
 
 ![](https://github.com/user-attachments/assets/538bec74-46bf-4565-b58a-4e09b42b2d14)
 
-確認出来たら正順にするために desc を消して
+確認出来たら Base データーベースを「電力データーベース.odb」で保存する。
 
-```
-select * from instant_epower order by recorded_at desc;
-```
+### Calc
 
-これを「クエリー 1」で保存する。
+Calc を開いて「データ」->「ピポットテーブル」->「挿入または編集」->「Calc に登録されたデータソース」を選んで
 
-「クエリー 1」をダブルクリックして実行する。
+![](https://github.com/user-attachments/assets/d53c1661-c60f-4bb6-9181-ee5603be76c0)
 
-![](https://github.com/user-attachments/assets/e5ddc495-9de5-43f3-b602-336bce6759e2)
+「データソースの選択」から 「電力データーベース.odb」と 「表」を選んでパスワード(raspberry)を入力して
 
-あとは Calc のデーターソースに、この Base データーベースを使って、グラフ化すればよいですね。
+![](https://github.com/user-attachments/assets/338982cb-0196-4dca-b399-e4c3d92b5ab9)
+
+「データソースの選択」から 「電力データーベース.odb」と 「表」とデータソースに「public.instant_epower」を選んで OK をクリックする。
+
+![](https://github.com/user-attachments/assets/1c21ddb6-a2e9-4a49-b752-b163a0cdb5f4)
+
+「ピポットテーブルのレイアウト」から 行フィールドに「recorded_at」と 「watt」を入れて、行と列の総計のチェックを外して OK をクリックする。
+
+![](https://github.com/user-attachments/assets/67365a4d-8f73-467c-bcb2-74b10b9e6e90)
+
+データーベースからデーターを取り出してシートが出来た
+![](https://github.com/user-attachments/assets/50e1ae12-926a-4569-9d04-55dfb1dc14cb)
+
+## グラフ化
+
+グラフの挿入でグラフを作った。
+![](https://github.com/user-attachments/assets/9cada0bf-5f4c-4c31-9ebe-1c123ff0d28d)
