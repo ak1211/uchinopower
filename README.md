@@ -653,15 +653,16 @@ uchinopower=#
 
 Base データーベースウイザードを開いて
 
-1. 既存のデーターベースに接続を選択して「PostgreSQL」を選ぶ
+1. 既存のデーターベースに接続を選択して「PostgreSQL」を選ぶ  
    ![](https://github.com/user-attachments/assets/b28e8c8b-06bf-4e87-95d5-a0eaeb25ca62)
-2. データーベース名「uchonopower」、サーバー「raspberrypi.local」を入力
+2. データーベース名「uchonopower」、サーバー「raspberrypi.local」を入力  
    ![](https://github.com/user-attachments/assets/d6382f6c-e8bb-4615-a275-f7500c6169fa)
-3. ユーザー名「postgres」、パスワードを要求するにチェックを入れて「接続のテスト」をクリック
+3. ユーザー名「postgres」、パスワードを要求するにチェックを入れて「接続のテスト」をクリック  
    ![](https://github.com/user-attachments/assets/95ed7924-5ebf-4bcf-a940-73e07d619987)
-4. パスワードは「raspberry」
+4. パスワードは「raspberry」  
    ![](https://github.com/user-attachments/assets/ff8807e5-f803-420e-a341-413bb28ea3c2)
-5. テスト結果成功を確認する![](https://github.com/user-attachments/assets/7299090a-b973-4b8a-92fe-3e8cfb783b98)
+5. テスト結果成功を確認する  
+   ![](https://github.com/user-attachments/assets/7299090a-b973-4b8a-92fe-3e8cfb783b98)
 
 完了したら保存する。
 
@@ -674,7 +675,9 @@ select * from instant_epower order by recorded_at desc;
 ```
 
 を入力して「クエリーの実行」で確認する
+
 ![](https://github.com/user-attachments/assets/538bec74-46bf-4565-b58a-4e09b42b2d14)
+
 確認出来たら正順にするために desc を消して
 
 ```
@@ -684,6 +687,7 @@ select * from instant_epower order by recorded_at desc;
 これを「クエリー 1」で保存する。
 
 「クエリー 1」をダブルクリックして実行する。
+
 ![](https://github.com/user-attachments/assets/e5ddc495-9de5-43f3-b602-336bce6759e2)
 
 あとは Calc のデーターソースに、この Base データーベースを使って、グラフ化すればよいですね。
