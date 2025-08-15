@@ -198,9 +198,10 @@ pi@raspberrypi:~ $
 このラズパイは有線接続なので、インターフェースは eth0 を見る。
 
 - ホスト名: raspberrypi
-- IP アドレス: 192.168.1.6/24
+- IPv4 アドレス: 192.168.1.6/24
+- IPv6 アドレス: 2400:4153:8082:af00:247e:6450:5fdb:d7ee/64
 
-Windows の WSL から確認する。
+### WSL の IP アドレスを確認する
 
 ```
 $ ip addr
@@ -230,7 +231,46 @@ $ ip addr
        valid_lft forever preferred_lft forever
 ```
 
-WSL 側の IP アドレス: 192.168.1.5/24
+WSL 側の イーサネットアドレス
+
+- IPv4 アドレス: 192.168.1.5/24
+- IPv6 アドレス: 2400:4153:8082:af00:a1cb:5bad:bae2:728c/64
+
+### WSL のコンソールからラズパイとの疎通確認
+
+WSL のコンソールから ラズパイに向けて ping を打つ。
+
+```
+$ ping 192.168.1.6
+PING 192.168.1.6 (192.168.1.6) 56(84) bytes of data.
+64 bytes from 192.168.1.6: icmp_seq=1 ttl=64 time=0.825 ms
+64 bytes from 192.168.1.6: icmp_seq=2 ttl=64 time=2.73 ms
+64 bytes from 192.168.1.6: icmp_seq=3 ttl=64 time=0.773 ms
+^C
+--- 192.168.1.6 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2189ms
+rtt min/avg/max/mdev = 0.773/1.441/2.725/0.908 ms
+```
+
+```
+aki@DESKTOP-JAGH6CN:~$ ping 2400:4153:8082:af00:247e:6450:5fdb:d7ee
+PING 2400:4153:8082:af00:247e:6450:5fdb:d7ee (2400:4153:8082:af00:247e:6450:5fdb:d7ee) 56 data bytes
+64 bytes from 2400:4153:8082:af00:247e:6450:5fdb:d7ee: icmp_seq=1 ttl=64 time=1.47 ms
+64 bytes from 2400:4153:8082:af00:247e:6450:5fdb:d7ee: icmp_seq=2 ttl=64 time=0.725 ms
+64 bytes from 2400:4153:8082:af00:247e:6450:5fdb:d7ee: icmp_seq=3 ttl=64 time=0.621 ms
+64 bytes from 2400:4153:8082:af00:247e:6450:5fdb:d7ee: icmp_seq=4 ttl=64 time=0.667 ms
+64 bytes from 2400:4153:8082:af00:247e:6450:5fdb:d7ee: icmp_seq=5 ttl=64 time=0.777 ms
+^C
+--- 2400:4153:8082:af00:247e:6450:5fdb:d7ee ping statistics ---
+5 packets transmitted, 5 received, 0% packet loss, time 4448ms
+rtt min/avg/max/mdev = 0.621/0.851/1.465/0.311 ms
+```
+
+### 'raspberrypi.local'との疎通確認
+
+mDNS によって'raspberrypi.local'の名前解決がなされているかを確認しておく。
+
+WSL コンソールで
 
 ```
 $ ping raspberrypi.local
@@ -246,24 +286,46 @@ PING raspberrypi.local (192.168.1.6) 56(84) bytes of data.
 rtt min/avg/max/mdev = 0.784/0.845/1.017/0.087 ms
 ```
 
+ついでに PowerShell で
+
+```
+PS C:\> ping raspberrypi.local
+
+raspberrypi.local [2400:4153:8082:af00:247e:6450:5fdb:d7ee]に ping を送信しています 32 バイトのデータ:
+2400:4153:8082:af00:247e:6450:5fdb:d7ee からの応答: 時間 <1ms
+2400:4153:8082:af00:247e:6450:5fdb:d7ee からの応答: 時間 <1ms
+2400:4153:8082:af00:247e:6450:5fdb:d7ee からの応答: 時間 <1ms
+2400:4153:8082:af00:247e:6450:5fdb:d7ee からの応答: 時間 <1ms
+
+2400:4153:8082:af00:247e:6450:5fdb:d7ee の ping 統計:
+    パケット数: 送信 = 4、受信 = 4、損失 = 0 (0% の損失)、
+ラウンド トリップの概算時間 (ミリ秒):
+    最小 = 0ms、最大 = 0ms、平均 = 0ms
+```
+
 WSL からラズパイに ping で疎通確認できた。
 
 ### pg_hba.conf を編集
 
 /etc/postgresql/ バージョン番号 /main/pg_hba.conf を編集して、
-192.168.1.1/24 のネットワークからパスワード認証でアクセスできるようにする。
+192.168.1.1/24 と 2400:4153:8082:af00::1 /64 のネットワークからパスワード認証でアクセスできるようにする。
 
 ```
 # IPv4 local connections:
 host    all             all             127.0.0.1/32            md5
+# IPv6 local connections:
+host    all             all             ::1/128                 md5
 ```
 
-に 192.168.1.1/24 の行を追加する。
+に 192.168.1.1/24 と 2400:4153:8082:af00::1/64 の行を追加する。
 
 ```
 # IPv4 local connections:
 host    all             all             127.0.0.1/32            md5
 host    all             all             192.168.1.1/24          md5
+# IPv6 local connections:
+host    all             all             ::1/128                 md5
+host    all             all             2400:4153:8082:af00::1/64  md5
 ```
 
 ### postgresql.conf を編集
@@ -283,6 +345,8 @@ listen_addresses を '\*' にする。
 ```
 sudo service postgresql start
 ```
+
+postgresq.service 稼働中に設定ファイルを編集した場合は、このコマンドで `sudo systemctl reload postgresql.service` 再読み込みする。
 
 ラズパイのポート 5432 (PostgreSQL)が LISTEN であることを確認する
 
