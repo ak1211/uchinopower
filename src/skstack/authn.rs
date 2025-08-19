@@ -3,11 +3,21 @@
 // SPDX-FileCopyrightText: 2025 Akihiro Yamamoto <github.com/ak1211>
 //
 use crate::skstack;
-use anyhow::{Context, bail};
 use std::io;
 use std::net::Ipv6Addr;
 use std::thread;
 use std::time::Duration;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("i/o")]
+    Io(#[from] io::Error),
+    #[error("コマンド実行に失敗しました。 ER(hex) {0:X}")]
+    Fail(u8),
+    #[error("PANAセッションが切断された")]
+    PanaSessionDisconnected,
+}
 
 #[derive(PartialEq, Eq)]
 /// 認証情報
@@ -64,7 +74,7 @@ pub fn connect(
     sender: &Ipv6Addr,
     channel: u8,
     pan_id: u16,
-) -> anyhow::Result<()> {
+) -> std::result::Result<(), Error> {
     let sender_address = sender.segments().map(|n| format!("{:04X}", n)).join(":");
 
     let connect_sequence = [
@@ -79,14 +89,10 @@ pub fn connect(
 
     // コマンド発行
     for command in connect_sequence.iter() {
-        skstack::send(writer, command.as_bytes()).context("write failed!")?;
+        skstack::send(writer, command.as_bytes())?;
         thread::sleep(Duration::from_millis(1));
         if let skstack::SkRxD::Fail(code) = skstack::receive(reader)? {
-            bail!(
-                "\"{}\" コマンド実行に失敗しました。 ER{}",
-                command.escape_debug(),
-                code
-            );
+            return Err(Error::Fail(code));
         }
     }
 
@@ -97,10 +103,10 @@ pub fn connect(
             // OK
             Ok(skstack::SkRxD::Ok) => {}
             // FAIL ER
-            Ok(skstack::SkRxD::Fail(code)) => bail!("\"コマンド実行に失敗しました。 ER{}", code),
+            Ok(skstack::SkRxD::Fail(code)) => return Err(Error::Fail(code)),
             // EVENT 0x24 = PANA接続失敗
             Ok(skstack::SkRxD::Event(event)) if event.code == 0x24 => {
-                bail!("\"PANA認証に失敗しました。")
+                return Err(Error::PanaSessionDisconnected);
             }
             // EVENT 0x25 = PANA接続完了
             Ok(skstack::SkRxD::Event(event)) if event.code == 0x25 => return Ok(()),
@@ -113,7 +119,7 @@ pub fn connect(
             //
             Err(e) if e.kind() == io::ErrorKind::TimedOut => continue, // タイムアウトエラーは無視する
             //
-            Err(e) => return Err(e).context("serial port read failed!"),
+            Err(e) => return Err(Error::Io(e)),
         }
     }
 }

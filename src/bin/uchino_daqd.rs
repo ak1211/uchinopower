@@ -2,22 +2,23 @@
 // SPDX-License-Identifier: MPL-2.0
 // SPDX-FileCopyrightText: 2025 Akihiro Yamamoto <github.com/ak1211>
 //
-use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Datelike, Days, TimeDelta, TimeZone, Timelike, Utc};
 use chrono_tz::Asia;
 use cron::Schedule;
 use daemonize::{self, Daemonize};
 use rust_decimal::Decimal;
-use serialport::{DataBits, SerialPort, StopBits};
+use serialport::{DataBits, StopBits};
 use sqlx::{self, QueryBuilder, postgres::PgPool};
 use std::env;
 use std::io::{self, BufReader};
 use std::net::Ipv6Addr;
 use std::process::ExitCode;
+use std::result;
 use std::str::FromStr;
 use std::sync::LazyLock;
 use std::thread;
 use std::time::{Duration, Instant};
+use thiserror::Error;
 use tokio;
 use tracing_appender;
 use tracing_subscriber::FmtSubscriber;
@@ -31,16 +32,44 @@ mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
 
-/// シリアルポートを開く
-fn open_port(port_name: &str) -> anyhow::Result<Box<dyn SerialPort>> {
-    let builder = serialport::new(port_name, 115200)
-        .stop_bits(StopBits::One)
-        .data_bits(DataBits::Eight)
-        .timeout(Duration::from_secs(1));
+#[derive(Debug, Error)]
+pub enum DaqDaemonError {
+    #[error("i/o")]
+    Io(#[from] io::Error),
 
-    builder
-        .open()
-        .with_context(move || format!("Failed to open \"{}\".", port_name))
+    #[error("serial port {0}")]
+    SerialPort(#[from] serialport::Error),
+
+    #[error("database")]
+    Database(#[from] sqlx::Error),
+
+    #[error(r#"invalid id "{0}""#)]
+    InvalidId(String),
+
+    #[error(r#"invalid password "{0}""#)]
+    InvalidPassword(String),
+
+    #[error("invalid mac address")]
+    InvalidMacAddress,
+
+    #[error("fail. code: {0:X}(hex)")]
+    CommandFail(u8),
+
+    #[error("PANA session disconnected")]
+    PanaSessionDisconnected,
+
+    #[error(r#"error. reason: "{0}""#)]
+    Other(&'static str),
+}
+
+impl From<authn::Error> for DaqDaemonError {
+    fn from(err: authn::Error) -> DaqDaemonError {
+        match err {
+            authn::Error::Fail(code) => DaqDaemonError::CommandFail(code),
+            authn::Error::Io(e) => DaqDaemonError::Io(e),
+            authn::Error::PanaSessionDisconnected => DaqDaemonError::PanaSessionDisconnected,
+        }
+    }
 }
 
 /// 今日の積算電力量履歴を取得するechonet lite電文
@@ -88,7 +117,7 @@ async fn commit_to_database<'a>(
     unit: &SM::UnitForCumlativeAmountsPower,
     recorded_at: DateTime<Utc>,
     frame: &EchonetliteFrame<'a>,
-) -> anyhow::Result<()> {
+) -> result::Result<(), DaqDaemonError> {
     match frame.esv {
         // Get_res プロパティ値読み出し応答
         0x72 => {
@@ -96,27 +125,19 @@ async fn commit_to_database<'a>(
                 match SM::Properties::try_from(v.clone()) {
                     // 0xe2 積算電力量計測値履歴1 (正方向計測値)
                     Ok(SM::Properties::HistoricalCumlativeAmount(hist)) => {
-                        commit_historical_cumlative_amount(&pool, unit, &hist)
-                            .await
-                            .ok();
+                        commit_historical_cumlative_amount(&pool, unit, &hist).await?;
                     }
                     // 0xe7 瞬時電力計測値
                     Ok(SM::Properties::InstantiousPower(epower)) => {
-                        commit_instant_epower(&pool, &recorded_at, &epower)
-                            .await
-                            .ok();
+                        commit_instant_epower(&pool, &recorded_at, &epower).await?;
                     }
                     // 0xe8 瞬時電流計測値
                     Ok(SM::Properties::InstantiousCurrent(current)) => {
-                        commit_instant_current(&pool, &recorded_at, &current)
-                            .await
-                            .ok();
+                        commit_instant_current(&pool, &recorded_at, &current).await?;
                     }
                     // 0xea 定時積算電力量計測値(正方向計測値)
                     Ok(SM::Properties::CumlativeAmountsOfPowerAtFixedTime(epower)) => {
-                        commit_cumlative_amount_epower(&pool, unit, &epower)
-                            .await
-                            .ok();
+                        commit_cumlative_amount_epower(&pool, unit, &epower).await?;
                     }
                     //
                     _ => {}
@@ -149,7 +170,7 @@ async fn rx_erxudp(
     pool: &PgPool,
     unit: &SM::UnitForCumlativeAmountsPower,
     erxudp: &Erxudp,
-) -> anyhow::Result<()> {
+) -> result::Result<(), DaqDaemonError> {
     // 受信時刻(分単位)
     let recorded_at = {
         let jst = Utc::now().with_timezone(&Asia::Tokyo);
@@ -163,7 +184,7 @@ async fn rx_erxudp(
                 0,
             )
             .single()
-            .context("time calcutate error")?;
+            .expect("time calculate error");
         modified.with_timezone(&Utc)
     };
     // ERXUDPメッセージからEchonetliteフレームを取り出す。
@@ -195,7 +216,7 @@ async fn rx_erxudp(
 }
 
 /// 設定情報をデーターベースから得る
-async fn read_settings(pool: &PgPool) -> anyhow::Result<ConnectionSettings> {
+async fn read_settings(pool: &PgPool) -> result::Result<ConnectionSettings, sqlx::Error> {
     #[derive(sqlx::FromRow)]
     #[allow(dead_code)]
     struct Row {
@@ -218,7 +239,7 @@ async fn commit_instant_epower(
     pool: &PgPool,
     recorded_at: &DateTime<Utc>,
     epower: &SM::InstantiousPower,
-) -> anyhow::Result<i64> {
+) -> result::Result<i64, DaqDaemonError> {
     let rec = sqlx::query!(
         r#"INSERT INTO instant_epower ( recorded_at, watt ) VALUES ( $1, $2 ) RETURNING id"#,
         *recorded_at,
@@ -235,7 +256,7 @@ async fn commit_instant_current(
     pool: &PgPool,
     recorded_at: &DateTime<Utc>,
     current: &SM::InstantiousCurrent,
-) -> anyhow::Result<i64> {
+) -> result::Result<i64, DaqDaemonError> {
     let rec = sqlx::query!(
         r#"INSERT INTO instant_current ( recorded_at, r, t ) VALUES ( $1, $2, $3 ) RETURNING id"#,
         *recorded_at,
@@ -253,7 +274,7 @@ async fn commit_cumlative_amount_epower(
     pool: &PgPool,
     unit: &SM::UnitForCumlativeAmountsPower,
     epower: &SM::CumlativeAmountsOfPowerAtFixedTime,
-) -> anyhow::Result<i64> {
+) -> result::Result<i64, DaqDaemonError> {
     let jst = Asia::Tokyo
         .with_ymd_and_hms(
             epower.time_point.year(),
@@ -264,7 +285,7 @@ async fn commit_cumlative_amount_epower(
             epower.time_point.second(),
         )
         .single()
-        .context("time calcutate error")?;
+        .expect("time calculate error");
     let kwh = Decimal::from(epower.cumlative_amounts_power) * unit.0;
     let rec = sqlx::query!(
         r#"INSERT INTO cumlative_amount_epower ( recorded_at, kwh ) VALUES ( $1, $2 ) RETURNING id"#,
@@ -282,16 +303,16 @@ async fn commit_historical_cumlative_amount(
     pool: &PgPool,
     unit: &SM::UnitForCumlativeAmountsPower,
     hist: &SM::HistoricalCumlativeAmount,
-) -> anyhow::Result<()> {
+) -> result::Result<(), DaqDaemonError> {
     let jst_now = Utc::now().with_timezone(&Asia::Tokyo);
     let jst_today = Asia::Tokyo
         .with_ymd_and_hms(jst_now.year(), jst_now.month(), jst_now.day(), 0, 0, 0)
         .single()
-        .context("time calcutate error")?;
+        .expect("time calculate error");
     let day = jst_today
         .checked_sub_days(Days::new(hist.n_days_ago as u64))
-        .with_context(|| format!("n_days_ago:{}", hist.n_days_ago))?;
-    let halfhour = TimeDelta::new(30 * 60, 0).context("time calcutate error")?;
+        .expect("time calculate error");
+    let halfhour = TimeDelta::new(30 * 60, 0).expect("time calculate error");
     //
     let mut accumulator = Some(day);
     let timeserial = std::iter::from_fn(move || {
@@ -354,24 +375,29 @@ async fn smartmeter_transmitter<T: io::Write + Send>(
         let now = Instant::now();
         if now >= rejoin_time {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            skstack::send(serial_port, b"SKREJOIN\r\n").map_err(anyhow::Error::from)?;
+            skstack::send(serial_port, b"SKREJOIN\r\n")?;
             rejoin_time = now + session_rejoin_period;
         }
     }
     Ok(())
 }
+
 /// スマートメーターからデーターを収集する
-async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::Result<()> {
+async fn exec_data_acquisition(
+    port_name: &str,
+    database_url: &str,
+) -> result::Result<(), DaqDaemonError> {
     let pool = PgPool::connect(database_url).await?;
 
     // データベースからスマートメーターの情報を得る
     let settings = read_settings(&pool).await?;
     let credentials = authn::Credentials {
-        id: authn::Id::from_str(&settings.RouteBId).map_err(|s| anyhow!(s))?,
-        password: authn::Password::from_str(&settings.RouteBPassword).map_err(|s| anyhow!(s))?,
+        id: authn::Id::from_str(&settings.RouteBId).map_err(|e| DaqDaemonError::InvalidId(e))?,
+        password: authn::Password::from_str(&settings.RouteBPassword)
+            .map_err(|e| DaqDaemonError::InvalidPassword(e))?,
     };
     let mac_address =
-        u64::from_str_radix(&settings.MacAddress, 16).context("MacAddress parse error")?;
+        u64::from_str_radix(&settings.MacAddress, 16).or(Err(DaqDaemonError::InvalidMacAddress))?;
 
     // MACアドレスからIPv6リンクローカルアドレスへ変換する
     // MACアドレスの最初の1バイト下位2bit目を反転して
@@ -381,13 +407,17 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
     );
 
     // シリアルポートを開く
-    let mut serial_port = open_port(port_name)?;
+    let mut serial_port = serialport::new(port_name, 115200)
+        .stop_bits(StopBits::One)
+        .data_bits(DataBits::Eight)
+        .timeout(Duration::from_secs(1))
+        .open()?;
 
     // シリアルポート読み込みはバッファリングする
     let mut serial_port_reader = serial_port
         .try_clone()
         .and_then(|cloned| Ok(BufReader::new(cloned)))
-        .context("Failed to clone")?;
+        .or(Err(DaqDaemonError::Other("Failed to clone")))?;
 
     // PANA セッションライフタイム値
     const SESSION_LIFETIME_OF_SECOND: u32 = 900;
@@ -408,16 +438,17 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
         settings.Channel,
         settings.PanId,
     )?;
+
     // 追加コマンド発行
     for command in custom_commands.iter() {
-        skstack::send(&mut serial_port, command.as_bytes()).map_err(anyhow::Error::from)?;
+        skstack::send(&mut serial_port, command.as_bytes())?;
         thread::sleep(Duration::from_millis(1));
         if let skstack::SkRxD::Fail(code) = skstack::receive(&mut serial_port_reader)? {
-            bail!(
-                "\"{}\" コマンド実行に失敗しました。 ER{}",
-                command.escape_debug(),
-                code
+            tracing::error!(
+                r#"コマンド "{}" 実行に失敗しました。"#,
+                command.escape_debug()
             );
+            return Err(DaqDaemonError::CommandFail(code));
         }
     }
 
@@ -427,13 +458,13 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
     });
 
     // スマートメーター受信
-    'rx_loop: loop {
+    loop {
         match skstack::receive(&mut serial_port_reader) {
             Ok(skstack::SkRxD::Void) => {}
             Ok(r @ skstack::SkRxD::Ok) => tracing::trace!("{r:?}"),
-            Ok(r @ skstack::SkRxD::Fail(_)) => {
-                tracing::error!("コマンド実行に失敗した。{r:?}");
-                bail!("コマンド実行に失敗した。{r:?}");
+            Ok(skstack::SkRxD::Fail(code)) => {
+                tracing::error!("コマンド実行に失敗した。{code:X}(hex)");
+                return Err(DaqDaemonError::CommandFail(code));
             }
             Ok(skstack::SkRxD::Event(event)) => match event.code {
                 0x01 => tracing::trace!("NS を受信した"),
@@ -451,40 +482,40 @@ async fn exec_data_acquisition(port_name: &str, database_url: &str) -> anyhow::R
                     tracing::trace!(
                         "PANA による接続過程でエラーが発生した（接続が完了しなかった）"
                     );
-                    break 'rx_loop;
+                    return Err(DaqDaemonError::PanaSessionDisconnected);
                 }
                 0x25 => tracing::trace!("PANA による接続が完了した"),
                 0x26 => tracing::trace!("接続相手からセッション終了要求を受信した"),
                 0x27 => {
                     tracing::trace!("PANA セッションの終了に成功した");
-                    break 'rx_loop;
+                    return Err(DaqDaemonError::PanaSessionDisconnected);
                 }
                 0x28 => {
                     tracing::trace!(
                         "PANA セッションの終了要求に対する応答がなくタイムアウトした（セッションは終了）"
                     );
-                    break 'rx_loop;
+                    return Err(DaqDaemonError::PanaSessionDisconnected);
                 }
                 0x29 => {
                     tracing::trace!("セッションのライフタイムが経過して期限切れになった");
-                    break 'rx_loop;
+                    return Err(DaqDaemonError::PanaSessionDisconnected);
                 }
                 0x32 => tracing::trace!("ARIB108 の送信総和時間の制限が発動した"),
                 0x33 => tracing::trace!("送信総和時間の制限が解除された"),
                 _ => tracing::trace!("{event:?}"),
             },
             Ok(r @ skstack::SkRxD::Epandesc(_)) => tracing::trace!("{r:?}"),
-            Ok(skstack::SkRxD::Erxudp(erxudp)) => rx_erxudp(&pool, &settings.Unit, &erxudp).await?,
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => {} // タイムアウトエラーは無視する
-            Err(e) => {
-                // IOエラーの場合は何もできない。
-                tracing::trace!("IOエラー:{e}");
-                bail!(e);
+            Ok(skstack::SkRxD::Erxudp(erxudp)) => {
+                match rx_erxudp(&pool, &settings.Unit, &erxudp).await {
+                    Ok(()) => {}
+                    Err(e) => return Err(e),
+                }
             }
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {} // タイムアウトエラーは無視する
+            Err(e) => return Err(DaqDaemonError::from(e)),
         }
         tokio::task::yield_now().await;
     }
-    Ok(())
 }
 
 fn main() -> ExitCode {
@@ -533,21 +564,30 @@ fn main() -> ExitCode {
             println!("{app_info} started.");
             tracing::info!("{app_info} started.");
             // メインループ
-            'infinite_loop: loop {
+            let reason = loop {
                 match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("Tokio runtime build error")
                     .block_on(exec_data_acquisition(&serial_device, &database_url))
                 {
-                    Ok(()) => continue 'infinite_loop,
-                    Err(e) => {
-                        eprintln!("{app_info} aborted, reason: {e}");
-                        tracing::error!("{app_info} aborted, reason: {e}");
-                        return ExitCode::FAILURE;
-                    }
+                    Ok(()) => {}
+                    Err(e @ DaqDaemonError::Io(_)) => break e.to_string(),
+                    Err(e @ DaqDaemonError::SerialPort(_)) => break e.to_string(),
+                    Err(e @ DaqDaemonError::Database(_)) => break e.to_string(),
+                    Err(e @ DaqDaemonError::InvalidId(_)) => break e.to_string(),
+                    Err(e @ DaqDaemonError::InvalidPassword(_)) => break e.to_string(),
+                    Err(e @ DaqDaemonError::InvalidMacAddress) => break e.to_string(),
+                    Err(e @ DaqDaemonError::CommandFail(_)) => break e.to_string(),
+                    Err(DaqDaemonError::PanaSessionDisconnected) => {}
+                    Err(e @ DaqDaemonError::Other(_)) => break e.to_string(),
                 }
-            }
+                thread::sleep(Duration::from_secs(5));
+            };
+            // abort
+            eprintln!("{app_info} aborted, reason: {reason}");
+            tracing::error!("{app_info} aborted, reason: {reason}");
+            return ExitCode::FAILURE;
         }
     }
 }
