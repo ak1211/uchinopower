@@ -202,7 +202,7 @@ async fn read_cumlative_amount_epower(pool: &PgPool) -> Result<Vec<CumlativeKilo
         .collect())
 }
 
-fn instantious_watt_chart(now: DateTime<Utc>, iw: &[InstantWatt]) -> BarChart {
+fn instantious_watt_chart<'a>(now: DateTime<Utc>, iw: &'a [InstantWatt]) -> BarChart<'a> {
     let bars: Vec<Bar> = iw
         .iter()
         .map(|a| {
@@ -227,7 +227,10 @@ fn instantious_watt_chart(now: DateTime<Utc>, iw: &[InstantWatt]) -> BarChart {
         .bar_gap(1)
 }
 
-fn cumlative_amount_epower_chart(now: DateTime<Utc>, kwh: &[CumlativeKiloWattHour]) -> BarChart {
+fn cumlative_amount_epower_chart<'a>(
+    now: DateTime<Utc>,
+    kwh: &'a [CumlativeKiloWattHour],
+) -> BarChart<'a> {
     let bars: Vec<Bar> = kwh
         .iter()
         .map(|a| {
