@@ -22,10 +22,10 @@ impl<'a> Properties {
     }
 }
 
-impl<'a> TryFrom<EchonetliteEdata<'a>> for Properties {
+impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for Properties {
     type Error = String;
 
-    fn try_from(edata: EchonetliteEdata) -> Result<Self, Self::Error> {
+    fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
         if let Ok(a) = GetPropertyMap::try_from(edata.clone()) {
             Ok(Properties::GetPropertyMap(a))
         } else if let Ok(a) = Manufacturer::try_from(edata.clone()) {

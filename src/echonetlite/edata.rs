@@ -16,9 +16,9 @@ pub struct EchonetliteEdata<'a> {
 
 impl<'a> EchonetliteEdata<'a> {
     pub fn show(&self, opt_unit: Option<&SM::UnitForCumlativeAmountsPower>) -> String {
-        if let Ok(a) = SM::Properties::try_from(self.clone()) {
+        if let Ok(a) = SM::Properties::try_from(self) {
             format!("{}", a.show(opt_unit))
-        } else if let Ok(a) = superclass::Properties::try_from(self.clone()) {
+        } else if let Ok(a) = superclass::Properties::try_from(self) {
             format!("{}", a.show())
         } else {
             format!(

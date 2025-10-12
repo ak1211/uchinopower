@@ -122,7 +122,7 @@ async fn commit_to_database<'a>(
         // Get_res プロパティ値読み出し応答
         0x72 => {
             for v in frame.edata.iter() {
-                match SM::Properties::try_from(v.clone()) {
+                match SM::Properties::try_from(v) {
                     // 0xe2 積算電力量計測値履歴1 (正方向計測値)
                     Ok(SM::Properties::HistoricalCumlativeAmount(hist)) => {
                         commit_historical_cumlative_amount(&pool, unit, &hist).await?;
@@ -147,7 +147,7 @@ async fn commit_to_database<'a>(
         // INF プロパティ値通知
         0x73 => {
             for v in frame.edata.iter() {
-                match SM::Properties::try_from(v.clone()) {
+                match SM::Properties::try_from(v) {
                     // 0xea 定時積算電力量計測値(正方向計測値)
                     Ok(SM::Properties::CumlativeAmountsOfPowerAtFixedTime(epower)) => {
                         commit_cumlative_amount_epower(&pool, unit, &epower)

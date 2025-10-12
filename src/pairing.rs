@@ -66,7 +66,7 @@ pub fn pairing(
         let mut unit_for_cumlative_amounts_power: Option<SM::UnitForCumlativeAmountsPower> = None;
         let mut coefficient: Option<SM::Coefficient> = None;
         //
-        for edata in props.iter() {
+        for edata in props {
             let frame = EchonetliteFrame {
                 ehd: 0x1081,              // 0x1081 = echonet lite
                 tid: 1,                   // tid
@@ -74,7 +74,7 @@ pub fn pairing(
                 deoj: [0x02, 0x88, 0x01], // smartmeter
                 esv: 0x62,                // get要求
                 opc: 1,                   // 1つ
-                edata: vec![edata.clone()],
+                edata: vec![edata],
             };
             skstack::send_echonetlite(port_writer, &sender, &frame)?;
             thread::sleep(time::Duration::from_secs(5));
@@ -108,7 +108,7 @@ pub fn pairing(
                         }
                         tracing::info!("{}", s.join(" "));
                         // 積算電力量単位値を取り出す
-                        for edata in frame.edata {
+                        for edata in frame.edata.iter() {
                             match SM::Properties::try_from(edata) {
                                 Ok(SM::Properties::UnitForCumlativeAmountsPower(a)) => {
                                     unit_for_cumlative_amounts_power = Some(a);
