@@ -36,25 +36,25 @@ impl<'a> Properties {
     }
 }
 
-impl<'a> TryFrom<EchonetliteEdata<'a>> for Properties {
+impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for Properties {
     type Error = String;
 
-    fn try_from(edata: EchonetliteEdata) -> Result<Self, Self::Error> {
-        if let Ok(a) = Coefficient::try_from(edata.clone()) {
+    fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
+        if let Ok(a) = Coefficient::try_from(edata) {
             Ok(Properties::Coefficient(a))
-        } else if let Ok(a) = NumberOfEffectiveDigits::try_from(edata.clone()) {
+        } else if let Ok(a) = NumberOfEffectiveDigits::try_from(edata) {
             Ok(Properties::NumberOfEffectiveDigits(a))
-        } else if let Ok(a) = CumlativeAmountsPower::try_from(edata.clone()) {
+        } else if let Ok(a) = CumlativeAmountsPower::try_from(edata) {
             Ok(Properties::CumlativeAmountsPower(a))
-        } else if let Ok(a) = UnitForCumlativeAmountsPower::try_from(edata.clone()) {
+        } else if let Ok(a) = UnitForCumlativeAmountsPower::try_from(edata) {
             Ok(Properties::UnitForCumlativeAmountsPower(a))
-        } else if let Ok(a) = HistoricalCumlativeAmount::try_from(edata.clone()) {
+        } else if let Ok(a) = HistoricalCumlativeAmount::try_from(edata) {
             Ok(Properties::HistoricalCumlativeAmount(a))
-        } else if let Ok(a) = InstantiousPower::try_from(edata.clone()) {
+        } else if let Ok(a) = InstantiousPower::try_from(edata) {
             Ok(Properties::InstantiousPower(a))
-        } else if let Ok(a) = InstantiousCurrent::try_from(edata.clone()) {
+        } else if let Ok(a) = InstantiousCurrent::try_from(edata) {
             Ok(Properties::InstantiousCurrent(a))
-        } else if let Ok(a) = CumlativeAmountsOfPowerAtFixedTime::try_from(edata.clone()) {
+        } else if let Ok(a) = CumlativeAmountsOfPowerAtFixedTime::try_from(edata) {
             Ok(Properties::CumlativeAmountsOfPowerAtFixedTime(a))
         } else {
             Err(format!("UNKNOWN EPC:0x{:X} EDT:{:?}", edata.epc, edata.edt))
@@ -76,10 +76,10 @@ impl Coefficient {
     pub const EPC: u8 = 0xd3; // 0xd3 係数
 }
 
-impl<'a> TryFrom<EchonetliteEdata<'a>> for Coefficient {
+impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for Coefficient {
     type Error = String;
 
-    fn try_from(edata: EchonetliteEdata) -> Result<Self, Self::Error> {
+    fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
         if edata.epc == Self::EPC {
             match edata.edt {
                 [a] => Ok(Self(*a)),
@@ -106,10 +106,10 @@ impl NumberOfEffectiveDigits {
     pub const EPC: u8 = 0xd7; // 0xd7 積算電力量有効桁数
 }
 
-impl<'a> TryFrom<EchonetliteEdata<'a>> for NumberOfEffectiveDigits {
+impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for NumberOfEffectiveDigits {
     type Error = String;
 
-    fn try_from(edata: EchonetliteEdata) -> Result<Self, Self::Error> {
+    fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
         match edata.edt {
             [a] if edata.epc == Self::EPC => Ok(Self(*a)),
             _ => Err(format!("BAD EPC:0x{:X} EDT:{:?}", edata.epc, edata.edt)),
@@ -142,10 +142,10 @@ impl CumlativeAmountsPower {
     }
 }
 
-impl<'a> TryFrom<EchonetliteEdata<'a>> for CumlativeAmountsPower {
+impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for CumlativeAmountsPower {
     type Error = String;
 
-    fn try_from(edata: EchonetliteEdata) -> Result<Self, Self::Error> {
+    fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
         match edata.edt {
             &[a, b, c, d] if edata.epc == Self::EPC => Ok(Self(u32::from_be_bytes([a, b, c, d]))),
             _ => Err(format!("BAD EPC:0x{:X} EDT:{:?}", edata.epc, edata.edt)),
@@ -167,10 +167,10 @@ impl UnitForCumlativeAmountsPower {
     pub const EPC: u8 = 0xe1; // 0xe1 積算電力量単位(正方向、逆方向計測値)
 }
 
-impl<'a> TryFrom<EchonetliteEdata<'a>> for UnitForCumlativeAmountsPower {
+impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for UnitForCumlativeAmountsPower {
     type Error = String;
 
-    fn try_from(edata: EchonetliteEdata) -> Result<Self, Self::Error> {
+    fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
         match edata.edt {
             [0x00] if edata.epc == Self::EPC => Ok(Self(Decimal::new(1, 0))), // 1.0 kwh
             [0x01] if edata.epc == Self::EPC => Ok(Self(Decimal::new(1, 1))), // 0.1 kwh
@@ -276,10 +276,10 @@ impl HistoricalCumlativeAmount {
     }
 }
 
-impl<'a> TryFrom<EchonetliteEdata<'a>> for HistoricalCumlativeAmount {
+impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for HistoricalCumlativeAmount {
     type Error = String;
 
-    fn try_from(edata: EchonetliteEdata) -> Result<Self, Self::Error> {
+    fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
         match edata.edt {
             [day0, day1, xs @ ..] if edata.epc == Self::EPC => {
                 let day = u16::from_be_bytes([*day0, *day1]);
@@ -320,10 +320,10 @@ impl InstantiousPower {
     pub const EPC: u8 = 0xe7; // 0xe7 瞬時電力計測値
 }
 
-impl<'a> TryFrom<EchonetliteEdata<'a>> for InstantiousPower {
+impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for InstantiousPower {
     type Error = String;
 
-    fn try_from(edata: EchonetliteEdata) -> Result<Self, Self::Error> {
+    fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
         match edata.edt {
             &[a, b, c, d] if edata.epc == Self::EPC => {
                 Ok(Self(Decimal::new(
@@ -353,10 +353,10 @@ impl InstantiousCurrent {
     pub const EPC: u8 = 0xe8; // 0xe8 瞬時電流計測値
 }
 
-impl<'a> TryFrom<EchonetliteEdata<'a>> for InstantiousCurrent {
+impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for InstantiousCurrent {
     type Error = String;
 
-    fn try_from(edata: EchonetliteEdata) -> Result<Self, Self::Error> {
+    fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
         match edata.edt {
             &[a, b, c, d] if edata.epc == Self::EPC => {
                 let rt = match (i16::from_be_bytes([a, b]), i16::from_be_bytes([c, d])) {
@@ -405,10 +405,10 @@ impl CumlativeAmountsOfPowerAtFixedTime {
     }
 }
 
-impl<'a> TryFrom<EchonetliteEdata<'a>> for CumlativeAmountsOfPowerAtFixedTime {
+impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for CumlativeAmountsOfPowerAtFixedTime {
     type Error = String;
 
-    fn try_from(edata: EchonetliteEdata) -> Result<Self, Self::Error> {
+    fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
         match edata.edt {
             &[
                 year0,                // 年 2bytes

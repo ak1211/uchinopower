@@ -2849,7 +2849,7 @@ checksum = "1dccffe3ce07af9386bfd29e80c0ab1a8205a2fc34e4bcd40364df902cfa8f3f"
 
 [[package]]
 name = "uchinoepower"
-version = "1.17.0"
+version = "1.18.0"
 dependencies = [
  "anyhow",
  "bincode",
