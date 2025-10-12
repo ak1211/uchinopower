@@ -26,11 +26,11 @@ impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for Properties {
     type Error = String;
 
     fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
-        if let Ok(a) = GetPropertyMap::try_from(edata.clone()) {
+        if let Ok(a) = GetPropertyMap::try_from(edata) {
             Ok(Properties::GetPropertyMap(a))
-        } else if let Ok(a) = Manufacturer::try_from(edata.clone()) {
+        } else if let Ok(a) = Manufacturer::try_from(edata) {
             Ok(Properties::Manufacturer(a))
-        } else if let Ok(a) = NotifyInstances::try_from(edata.clone()) {
+        } else if let Ok(a) = NotifyInstances::try_from(edata) {
             Ok(Properties::NotifyInstances(a))
         } else {
             Err(format!("UNKNOWN EPC:0x{:X} EDT:{:?}", edata.epc, edata.edt))
@@ -57,10 +57,10 @@ impl GetPropertyMap {
     pub const EPC: u8 = 0x9f; // 0x9f Getプロパティマップ
 }
 
-impl<'a> TryFrom<EchonetliteEdata<'a>> for GetPropertyMap {
+impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for GetPropertyMap {
     type Error = String;
 
-    fn try_from(edata: EchonetliteEdata) -> Result<Self, Self::Error> {
+    fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
         match edata.edt {
             [count, props @ ..] if edata.epc == Self::EPC => {
                 let mut get_property_map: Vec<u8> = Vec::with_capacity(*count as usize);
@@ -127,10 +127,10 @@ impl Manufacturer {
     pub const EPC: u8 = 0x8a; // 0x8a メーカーコード
 }
 
-impl<'a> TryFrom<EchonetliteEdata<'a>> for Manufacturer {
+impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for Manufacturer {
     type Error = String;
 
-    fn try_from(edata: EchonetliteEdata) -> Result<Self, Self::Error> {
+    fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
         match edata.edt {
             triple @ [_0, _1, _2] if edata.epc == Self::EPC => {
                 let manufacturer = triple
@@ -161,10 +161,10 @@ impl NotifyInstances {
     pub const EPC: u8 = 0xd5; // 0xd5 インスタンスリスト通知
 }
 
-impl<'a> TryFrom<EchonetliteEdata<'a>> for NotifyInstances {
+impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for NotifyInstances {
     type Error = String;
 
-    fn try_from(edata: EchonetliteEdata) -> Result<Self, Self::Error> {
+    fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
         match edata.edt {
             [count, data @ ..] if edata.epc == Self::EPC => {
                 let instances = data
