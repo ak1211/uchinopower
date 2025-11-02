@@ -38,12 +38,11 @@ pub fn receive(r: &mut BufReader<dyn io::Read>) -> io::Result<SkRxD> {
     }
 }
 
-/// Echonetliteメッセージ送信
-pub fn send_echonetlite(
-    w: &mut dyn io::Write,
+/// EchonetliteフレームからSKSENDTOコマンドを作る
+pub fn command_from_echonetliteframe(
     sender: &Ipv6Addr,
     frame: &EchonetliteFrame,
-) -> anyhow::Result<()> {
+) -> Result<Vec<u8>, bincode::error::EncodeError> {
     let sender_address = sender.segments().map(|n| format!("{:04X}", n)).join(":");
     let config = bincode::config::standard()
         .with_big_endian()
@@ -56,5 +55,5 @@ pub fn send_echonetlite(
         payload.len(),
     );
     let command = [sksendto.as_bytes(), &payload].concat();
-    send(w, &command).map_err(anyhow::Error::from)
+    Ok(command)
 }

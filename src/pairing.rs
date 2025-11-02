@@ -76,7 +76,8 @@ pub fn pairing(
                 opc: 1,                   // 1つ
                 edata: vec![edata],
             };
-            skstack::send_echonetlite(port_writer, &sender, &frame)?;
+            let command = skstack::command_from_echonetliteframe(&sender, &frame)?;
+            skstack::send(port_writer, &command)?;
             thread::sleep(time::Duration::from_secs(5));
             // イベント受信
             'exit: loop {
