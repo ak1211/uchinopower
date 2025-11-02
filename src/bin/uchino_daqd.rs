@@ -37,6 +37,15 @@ pub enum DaqDaemonError {
     #[error("i/o")]
     Io(#[from] io::Error),
 
+    #[error("binary encode")]
+    BinaryEncode(#[from] bincode::error::EncodeError),
+
+    #[error("cron")]
+    Cron(#[from] cron::error::Error),
+
+    #[error("out of range")]
+    OutOfRange(#[from] chrono::OutOfRangeError),
+
     #[error("serial port {0}")]
     SerialPort(#[from] serialport::Error),
 
@@ -356,9 +365,10 @@ async fn smartmeter_transmitter<T: io::Write + Send>(
     sender: &Ipv6Addr,
     session_rejoin_period: Duration,
     serial_port: &mut T,
-) -> anyhow::Result<()> {
+) -> result::Result<(), DaqDaemonError> {
     // メッセージ送信(今日の積算電力量履歴)
-    skstack::send_echonetlite(serial_port, &sender, &TODAY_CWH)?;
+    let command = skstack::command_from_echonetliteframe(&sender, &TODAY_CWH)?;
+    skstack::send(serial_port, &command)?;
 
     let mut rejoin_time = Instant::now() + session_rejoin_period;
 
@@ -370,7 +380,8 @@ async fn smartmeter_transmitter<T: io::Write + Send>(
         tracing::trace!("Next scheduled time. ({}), sleep ({:?})", next, duration);
         tokio::time::sleep(duration).await;
         // メッセージ送信(瞬時電力と瞬時電流計測値)
-        skstack::send_echonetlite(serial_port, &sender, &INSTANT_WATT_AMPERE)?;
+        let command = skstack::command_from_echonetliteframe(&sender, &INSTANT_WATT_AMPERE)?;
+        skstack::send(serial_port, &command)?;
         // 再認証を要求する
         let now = Instant::now();
         if now >= rejoin_time {
@@ -380,6 +391,73 @@ async fn smartmeter_transmitter<T: io::Write + Send>(
         }
     }
     Ok(())
+}
+
+#[tracing::instrument(skip_all)]
+/// 受信
+async fn smartmeter_receiver<T: io::Read + Send + 'static>(
+    pool: &PgPool,
+    settings: &ConnectionSettings,
+    serial_port_reader: &mut BufReader<T>,
+) -> result::Result<(), DaqDaemonError> {
+    loop {
+        match skstack::receive(serial_port_reader) {
+            Ok(skstack::SkRxD::Void) => {}
+            Ok(r @ skstack::SkRxD::Ok) => tracing::trace!("{r:?}"),
+            Ok(skstack::SkRxD::Fail(code)) => {
+                tracing::error!("コマンド実行に失敗した。{code:X}(hex)");
+                return Err(DaqDaemonError::CommandFail(code));
+            }
+            Ok(skstack::SkRxD::Event(event)) => match event.code {
+                0x01 => tracing::trace!("NS を受信した"),
+                0x02 => tracing::trace!("NA を受信した"),
+                0x05 => tracing::trace!("Echo Request を受信した"),
+                0x1f => tracing::trace!("ED スキャンが完了した"),
+                0x20 => tracing::trace!("Beacon を受信した"),
+                0x21 if Some(0) == event.param => tracing::trace!("UDP の送信に成功"),
+                0x21 if Some(1) == event.param => tracing::trace!("UDP の送信に失敗"),
+                0x21 if Some(2) == event.param => {
+                    tracing::trace!("UDP を送信する代わりにアドレス要請を行った")
+                }
+                0x22 => tracing::trace!("アクティブスキャンが完了した"),
+                0x24 => {
+                    tracing::trace!(
+                        "PANA による接続過程でエラーが発生した（接続が完了しなかった）"
+                    );
+                    return Err(DaqDaemonError::PanaSessionDisconnected);
+                }
+                0x25 => tracing::trace!("PANA による接続が完了した"),
+                0x26 => tracing::trace!("接続相手からセッション終了要求を受信した"),
+                0x27 => {
+                    tracing::trace!("PANA セッションの終了に成功した");
+                    return Err(DaqDaemonError::PanaSessionDisconnected);
+                }
+                0x28 => {
+                    tracing::trace!(
+                        "PANA セッションの終了要求に対する応答がなくタイムアウトした（セッションは終了）"
+                    );
+                    return Err(DaqDaemonError::PanaSessionDisconnected);
+                }
+                0x29 => {
+                    tracing::trace!("セッションのライフタイムが経過して期限切れになった");
+                    return Err(DaqDaemonError::PanaSessionDisconnected);
+                }
+                0x32 => tracing::trace!("ARIB108 の送信総和時間の制限が発動した"),
+                0x33 => tracing::trace!("送信総和時間の制限が解除された"),
+                _ => tracing::trace!("{event:?}"),
+            },
+            Ok(r @ skstack::SkRxD::Epandesc(_)) => tracing::trace!("{r:?}"),
+            Ok(skstack::SkRxD::Erxudp(erxudp)) => {
+                match rx_erxudp(&pool, &settings.Unit, &erxudp).await {
+                    Ok(()) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {} // タイムアウトエラーは無視する
+            Err(e) => return Err(DaqDaemonError::from(e)),
+        }
+        tokio::task::yield_now().await;
+    }
 }
 
 /// スマートメーターからデーターを収集する
@@ -453,68 +531,19 @@ async fn exec_data_acquisition(
     }
 
     // スマートメーター送信用スレッド
-    tokio::spawn(async move {
+    let handle_transmitter = tokio::spawn(async move {
         smartmeter_transmitter(&sender, session_rejoin_period, &mut serial_port).await
     });
 
-    // スマートメーター受信
-    loop {
-        match skstack::receive(&mut serial_port_reader) {
-            Ok(skstack::SkRxD::Void) => {}
-            Ok(r @ skstack::SkRxD::Ok) => tracing::trace!("{r:?}"),
-            Ok(skstack::SkRxD::Fail(code)) => {
-                tracing::error!("コマンド実行に失敗した。{code:X}(hex)");
-                return Err(DaqDaemonError::CommandFail(code));
-            }
-            Ok(skstack::SkRxD::Event(event)) => match event.code {
-                0x01 => tracing::trace!("NS を受信した"),
-                0x02 => tracing::trace!("NA を受信した"),
-                0x05 => tracing::trace!("Echo Request を受信した"),
-                0x1f => tracing::trace!("ED スキャンが完了した"),
-                0x20 => tracing::trace!("Beacon を受信した"),
-                0x21 if Some(0) == event.param => tracing::trace!("UDP の送信に成功"),
-                0x21 if Some(1) == event.param => tracing::trace!("UDP の送信に失敗"),
-                0x21 if Some(2) == event.param => {
-                    tracing::trace!("UDP を送信する代わりにアドレス要請を行った")
-                }
-                0x22 => tracing::trace!("アクティブスキャンが完了した"),
-                0x24 => {
-                    tracing::trace!(
-                        "PANA による接続過程でエラーが発生した（接続が完了しなかった）"
-                    );
-                    return Err(DaqDaemonError::PanaSessionDisconnected);
-                }
-                0x25 => tracing::trace!("PANA による接続が完了した"),
-                0x26 => tracing::trace!("接続相手からセッション終了要求を受信した"),
-                0x27 => {
-                    tracing::trace!("PANA セッションの終了に成功した");
-                    return Err(DaqDaemonError::PanaSessionDisconnected);
-                }
-                0x28 => {
-                    tracing::trace!(
-                        "PANA セッションの終了要求に対する応答がなくタイムアウトした（セッションは終了）"
-                    );
-                    return Err(DaqDaemonError::PanaSessionDisconnected);
-                }
-                0x29 => {
-                    tracing::trace!("セッションのライフタイムが経過して期限切れになった");
-                    return Err(DaqDaemonError::PanaSessionDisconnected);
-                }
-                0x32 => tracing::trace!("ARIB108 の送信総和時間の制限が発動した"),
-                0x33 => tracing::trace!("送信総和時間の制限が解除された"),
-                _ => tracing::trace!("{event:?}"),
-            },
-            Ok(r @ skstack::SkRxD::Epandesc(_)) => tracing::trace!("{r:?}"),
-            Ok(skstack::SkRxD::Erxudp(erxudp)) => {
-                match rx_erxudp(&pool, &settings.Unit, &erxudp).await {
-                    Ok(()) => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => {} // タイムアウトエラーは無視する
-            Err(e) => return Err(DaqDaemonError::from(e)),
-        }
-        tokio::task::yield_now().await;
+    // スマートメーター受信用スレッド
+    let handle_receiver = tokio::spawn(async move {
+        smartmeter_receiver(&pool, &settings, &mut serial_port_reader).await
+    });
+
+    //
+    tokio::select! {
+        v = handle_transmitter => v.unwrap(),
+        v = handle_receiver => v.unwrap()
     }
 }
 
@@ -568,11 +597,14 @@ fn main() -> ExitCode {
                 match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .expect("Tokio runtime build error")
+                    .unwrap()
                     .block_on(exec_data_acquisition(&serial_device, &database_url))
                 {
                     Ok(()) => {}
                     Err(e @ DaqDaemonError::Io(_)) => break e.to_string(),
+                    Err(e @ DaqDaemonError::BinaryEncode(_)) => break e.to_string(),
+                    Err(e @ DaqDaemonError::Cron(_)) => break e.to_string(),
+                    Err(e @ DaqDaemonError::OutOfRange(_)) => break e.to_string(),
                     Err(e @ DaqDaemonError::SerialPort(_)) => break e.to_string(),
                     Err(e @ DaqDaemonError::Database(_)) => break e.to_string(),
                     Err(e @ DaqDaemonError::InvalidId(_)) => break e.to_string(),

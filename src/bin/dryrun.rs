@@ -267,7 +267,8 @@ fn exec_dryrun(cli: &Cli) -> anyhow::Result<()> {
                 opc: 1,                   // 1つ
                 edata: vec![edata.clone()],
             };
-            skstack::send_echonetlite(&mut serial_port, &sender, &frame)?;
+            let command = skstack::command_from_echonetliteframe(&sender, &frame)?;
+            skstack::send(&mut serial_port, &command)?;
             thread::sleep(time::Duration::from_secs(5));
         }
 
@@ -281,7 +282,8 @@ fn exec_dryrun(cli: &Cli) -> anyhow::Result<()> {
 
         // Echonetliteメッセージ送信
         for &msg in elmessages.iter() {
-            skstack::send_echonetlite(&mut serial_port, &sender, msg)?;
+            let command = skstack::command_from_echonetliteframe(&sender, msg)?;
+            skstack::send(&mut serial_port, &command)?;
             thread::sleep(time::Duration::from_secs(10));
         }
 
