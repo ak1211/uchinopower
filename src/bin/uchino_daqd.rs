@@ -34,22 +34,22 @@ mod built_info {
 
 #[derive(Debug, Error)]
 pub enum DaqDaemonError {
-    #[error("i/o")]
+    #[error(r#"i/o "{0}""#)]
     Io(#[from] io::Error),
 
-    #[error("binary encode")]
+    #[error(r#"binary encode "{0}""#)]
     BinaryEncode(#[from] bincode::error::EncodeError),
 
-    #[error("cron")]
+    #[error(r#"cron "{0}""#)]
     Cron(#[from] cron::error::Error),
 
-    #[error("out of range")]
+    #[error(r#"out of range "{0}""#)]
     OutOfRange(#[from] chrono::OutOfRangeError),
 
-    #[error("serial port {0}")]
+    #[error(r#"serial port "{0}""#)]
     SerialPort(#[from] serialport::Error),
 
-    #[error("database")]
+    #[error(r#"database "{0}""#)]
     Database(#[from] sqlx::Error),
 
     #[error(r#"invalid id "{0}""#)]
