@@ -560,15 +560,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "daemonize"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab8bfdaacb3c887a54d41bdf48d3af8873b3f5566469f8ba21b92057509f116e"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2795,6 +2786,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-journald"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d3a81ed245bfb62592b1e2bc153e77656d94ee6a0497683a65a12ccaf2438d0"
+dependencies = [
+ "libc",
+ "tracing-core",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tracing-log"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2832,7 +2834,7 @@ checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 
 [[package]]
 name = "uchinoepower"
-version = "1.21.0"
+version = "1.30.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2843,7 +2845,6 @@ dependencies = [
  "color-eyre",
  "cron",
  "crossterm",
- "daemonize",
  "dotenv",
  "futures",
  "futures-util",
@@ -2861,6 +2862,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-appender",
+ "tracing-journald",
  "tracing-subscriber",
 ]
 
