@@ -511,12 +511,14 @@ Description=data acquisition from smartmeter route-B
 After=syslog.target network.target
 
 [Service]
-Type=forking
+Type=simple
 PIDFile=/run/uchino_daqd.pid
 ExecStart=/usr/local/sbin/uchino_daqd
 WorkingDirectory=/tmp
 KillMode=process
 Restart=always
+User=daemon
+Group=dialout
 Environment=SERIAL_DEVICE=/dev/ttyUSB0
 Environment=DATABASE_URL=postgres://postgres:raspberry@localhost:5432/uchinopower
 
@@ -524,24 +526,10 @@ Environment=DATABASE_URL=postgres://postgres:raspberry@localhost:5432/uchinopowe
 WantedBy=multi-user.target
 ```
 
-お好みで
-
-```
-Environment=RUST_LOG=trace
-```
-
-などを加えてもいいですね。
-
 ### service ファイルを再読み込みする
 
 ```
 pi@raspberrypi:~ $ sudo systemctl daemon-reload
-```
-
-### ログ書込みディレクトリを作る
-
-```
-pi@raspberrypi:~ $ sudo install -m 775 -o daemon -g daemon -d /var/log/uchinopower/
 ```
 
 ### 起動
@@ -565,6 +553,10 @@ pi@raspberrypi:~ $ systemctl status uchinopower.service
 
 Jul 13 15:08:30 raspberrypi systemd[1]: Starting data acquisition from smartmeter route-B...
 Jul 13 15:08:30 raspberrypi systemd[1]: Started data acquisition from smartmeter route-B.
+```
+
+```
+pi@raspberrypi:~ $ journalctl -u uchinopower.service
 ```
 
 #### 自動起動有効化

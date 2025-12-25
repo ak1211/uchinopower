@@ -5,7 +5,6 @@
 use chrono::{DateTime, Datelike, Days, TimeDelta, TimeZone, Timelike, Utc};
 use chrono_tz::Asia;
 use cron::Schedule;
-use daemonize::{self, Daemonize};
 use rust_decimal::Decimal;
 use serialport::{DataBits, StopBits};
 use sqlx::{self, QueryBuilder, postgres::PgPool};
@@ -20,8 +19,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio;
-use tracing_appender;
-use tracing_subscriber::FmtSubscriber;
+use tracing::{Event, Subscriber};
+use tracing_subscriber::{
+    fmt::{self, FormatEvent, FormatFields},
+    layer::SubscriberExt,
+    registry::LookupSpan,
+    util::SubscriberInitExt,
+};
 use uchinoepower::connection_settings::ConnectionSettings;
 use uchinoepower::echonetlite::{
     EchonetliteEdata, EchonetliteFrame, smart_electric_energy_meter as SM,
@@ -67,7 +71,7 @@ pub enum DaqDaemonError {
     #[error("PANA session disconnected")]
     PanaSessionDisconnected,
 
-    #[error(r#"error. reason: "{0}""#)]
+    #[error("{0}")]
     Other(&'static str),
 }
 
@@ -447,12 +451,7 @@ async fn smartmeter_receiver<T: io::Read + Send + 'static>(
                 _ => tracing::trace!("{event:?}"),
             },
             Ok(r @ skstack::SkRxD::Epandesc(_)) => tracing::trace!("{r:?}"),
-            Ok(skstack::SkRxD::Erxudp(erxudp)) => {
-                match rx_erxudp(&pool, &settings.Unit, &erxudp).await {
-                    Ok(()) => {}
-                    Err(e) => return Err(e),
-                }
-            }
+            Ok(skstack::SkRxD::Erxudp(erxudp)) => rx_erxudp(&pool, &settings.Unit, &erxudp).await?,
             Err(e) if e.kind() == io::ErrorKind::TimedOut => {} // タイムアウトエラーは無視する
             Err(e) => return Err(DaqDaemonError::from(e)),
         }
@@ -495,7 +494,7 @@ async fn exec_data_acquisition(
     let mut serial_port_reader = serial_port
         .try_clone()
         .and_then(|cloned| Ok(BufReader::new(cloned)))
-        .or(Err(DaqDaemonError::Other("Failed to clone")))?;
+        .or(Err(DaqDaemonError::Other("Failed to clone serial_port")))?;
 
     // PANA セッションライフタイム値
     const SESSION_LIFETIME_OF_SECOND: u32 = 900;
@@ -547,79 +546,115 @@ async fn exec_data_acquisition(
     }
 }
 
-fn main() -> ExitCode {
+/// SKSETPWD C 以降のパスワードをマスクするフォーマッタ
+struct MaskingRouteBPasswordFormatter;
+
+impl<S, N> FormatEvent<S, N> for MaskingRouteBPasswordFormatter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &fmt::FmtContext<'_, S, N>,
+        mut writer: fmt::format::Writer<'_>,
+        event: &Event<'_>,
+    ) -> std::fmt::Result {
+        // まず標準フォーマットをバッファに書き出す
+        let mut buf = String::new();
+        {
+            let temp_writer = fmt::format::Writer::new(&mut buf);
+            fmt::format::Format::default().format_event(ctx, temp_writer, event)?;
+        }
+
+        // マスク処理
+        const PATTERN: &'static str = "SKSETPWD C ";
+        if let Some(pos) = buf.find(PATTERN) {
+            let start = pos + PATTERN.len();
+            let end = (start + 12).min(buf.len() - 1);
+            let masking_str = "#".repeat(end - start);
+            buf.replace_range(start..end, &masking_str)
+        }
+        // 出力
+        writer.write_str(&buf)
+    }
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
     // プログラムの情報
     let git_head_ref = built_info::GIT_HEAD_REF.unwrap_or_default();
     let app_info = format!(
-        "{} / {}{} daemon",
+        "{} / {}{}",
         built_info::PKG_NAME,
         built_info::PKG_VERSION,
         built_info::GIT_COMMIT_HASH_SHORT
             .map(|s| format!(" ({s} - {git_head_ref})"))
             .unwrap_or_default()
     );
-    // 環境変数
-    let serial_device = env::var("SERIAL_DEVICE").expect("Must be set to SERIAL_DEVICE");
-    let database_url = env::var("DATABASE_URL").expect("Must be set to DATABASE_URL");
-    // デーモンプロセスにする
-    let daemonize = Daemonize::new()
-        .pid_file("/run/uchino_daqd.pid")
-        .working_directory("/tmp")
-        .user("daemon")
-        .group("dialout")
-        .stderr(daemonize::Stdio::keep())
-        .stdout(daemonize::Stdio::keep());
-    match daemonize.start() {
+
+    // tracingの設定
+    let registry = tracing_subscriber::registry();
+
+    // systemd-journaldに接続
+    match tracing_journald::layer() {
+        // journaldにログ出力する
+        Ok(journald_layer) => registry.with(journald_layer).init(),
+        // journaldが使えないので、標準出力にログ出力する
         Err(e) => {
-            eprintln!("{app_info} aborted, reason: {e}");
-            return ExitCode::FAILURE;
-        }
-        Ok(()) => {
-            // ここからデーモンプロセス始まり
-            let file_appender =
-                tracing_appender::rolling::daily("/var/log/uchinopower", "uchino_daqd.log");
-            let subscriber = FmtSubscriber::builder()
-                .with_max_level(tracing::Level::TRACE)
-                .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
-                .with_file(false)
-                .with_line_number(false)
-                .with_thread_names(true)
-                .with_thread_ids(true)
-                .with_ansi(false)
-                .with_writer(file_appender)
-                .finish();
-            tracing::subscriber::set_global_default(subscriber)
-                .expect("setting default subscriber failed");
-            println!("{app_info} started.");
-            tracing::info!("{app_info} started.");
-            // メインループ
-            let reason = loop {
-                match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(exec_data_acquisition(&serial_device, &database_url))
-                {
-                    Ok(()) => {}
-                    Err(e @ DaqDaemonError::Io(_)) => break e.to_string(),
-                    Err(e @ DaqDaemonError::BinaryEncode(_)) => break e.to_string(),
-                    Err(e @ DaqDaemonError::Cron(_)) => break e.to_string(),
-                    Err(e @ DaqDaemonError::OutOfRange(_)) => break e.to_string(),
-                    Err(e @ DaqDaemonError::SerialPort(_)) => break e.to_string(),
-                    Err(e @ DaqDaemonError::Database(_)) => break e.to_string(),
-                    Err(e @ DaqDaemonError::InvalidId(_)) => break e.to_string(),
-                    Err(e @ DaqDaemonError::InvalidPassword(_)) => break e.to_string(),
-                    Err(e @ DaqDaemonError::InvalidMacAddress) => break e.to_string(),
-                    Err(e @ DaqDaemonError::CommandFail(_)) => break e.to_string(),
-                    Err(DaqDaemonError::PanaSessionDisconnected) => {}
-                    Err(e @ DaqDaemonError::Other(_)) => break e.to_string(),
-                }
-                thread::sleep(Duration::from_secs(5));
-            };
-            // abort
-            eprintln!("{app_info} aborted, reason: {reason}");
-            tracing::error!("{app_info} aborted, reason: {reason}");
-            return ExitCode::FAILURE;
+            registry
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
+                        .with_file(false)
+                        .with_line_number(false)
+                        .with_thread_names(false)
+                        .with_thread_ids(false)
+                        .with_ansi(false)
+                        .event_format(MaskingRouteBPasswordFormatter),
+                )
+                .init();
+            tracing::error!("couldn't connect to journald: {}", e)
         }
     }
+
+    // このサービス本体
+    let the_service_provider = async || -> result::Result<(), DaqDaemonError> {
+        // 環境変数
+        let serial_device = env::var("SERIAL_DEVICE")
+            .map_err(|_| DaqDaemonError::Other(r#"Must be set to "SERIAL_DEVICE" environment."#))?;
+        let database_url = env::var("DATABASE_URL")
+            .map_err(|_| DaqDaemonError::Other(r#"Must be set to "DATABASE_URL" environment."#))?;
+        exec_data_acquisition(&serial_device, &database_url).await
+    };
+
+    // サービスを開始する
+    tracing::info!("{app_info} started.");
+    let reason = loop {
+        break match the_service_provider().await {
+            Ok(()) => {
+                tokio::time::sleep(Duration::from_secs(5)).await; // 再始動まで少々クールダウン時間をもつ
+                continue; // 再始動
+            }
+            Err(e @ DaqDaemonError::Io(_)) => e.to_string(),
+            Err(e @ DaqDaemonError::BinaryEncode(_)) => e.to_string(),
+            Err(e @ DaqDaemonError::Cron(_)) => e.to_string(),
+            Err(e @ DaqDaemonError::OutOfRange(_)) => e.to_string(),
+            Err(e @ DaqDaemonError::SerialPort(_)) => e.to_string(),
+            Err(e @ DaqDaemonError::Database(_)) => e.to_string(),
+            Err(e @ DaqDaemonError::InvalidId(_)) => e.to_string(),
+            Err(e @ DaqDaemonError::InvalidPassword(_)) => e.to_string(),
+            Err(e @ DaqDaemonError::InvalidMacAddress) => e.to_string(),
+            Err(e @ DaqDaemonError::CommandFail(_)) => e.to_string(),
+            Err(DaqDaemonError::PanaSessionDisconnected) => {
+                tokio::time::sleep(Duration::from_secs(5)).await; // 再始動まで少々クールダウン時間をもつ
+                continue; // 再始動
+            }
+            Err(e @ DaqDaemonError::Other(_)) => e.to_string(),
+        };
+    };
+
+    // ここに到達するのは異常終了しかありえない
+    tracing::error!("{app_info} aborted, reason: {reason}");
+    return ExitCode::FAILURE;
 }

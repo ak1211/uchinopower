@@ -3,12 +3,14 @@ Description=data acquisition from smartmeter route-B
 After=syslog.target network.target
 
 [Service]
-Type=forking
+Type=simple
 PIDFile=/run/uchino_daqd.pid
 ExecStart=/usr/local/sbin/uchino_daqd
 WorkingDirectory=/tmp
 KillMode=process
 Restart=always
+User=daemon
+Group=dialout
 Environment=SERIAL_DEVICE=/dev/ttyUSB0
 Environment=DATABASE_URL=postgres://postgres:raspberry@localhost:5432/uchinopower
 

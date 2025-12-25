@@ -12,12 +12,12 @@ use std::net::Ipv6Addr;
 /// コマンドを送信する
 pub fn send(w: &mut dyn io::Write, command: &[u8]) -> io::Result<()> {
     // ポートに書き込む
-    let s = command
+    let str_command = command
         .into_iter()
         .map(|n| *n as char)
         .filter(|n| n.is_ascii())
         .collect::<String>();
-    tracing::trace!(target:"Tx->","{}", s.escape_debug());
+    tracing::trace!(target:"Tx->","{}",str_command.escape_debug());
     w.write_all(command)
 }
 

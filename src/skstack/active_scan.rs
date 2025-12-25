@@ -25,7 +25,7 @@ pub fn active_scan(
         skstack::send(port_writer, command.as_bytes()).context("write failed!")?;
         if let skstack::SkRxD::Fail(code) = skstack::receive(port_reader)? {
             bail!(
-                "\"{}\" コマンド実行に失敗しました。 ER{}",
+                r#"コマンド "{}" 実行に失敗しました。 ER{}"#,
                 command.escape_debug(),
                 code
             );
