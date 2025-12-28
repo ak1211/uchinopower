@@ -128,52 +128,31 @@ static INSTANT_WATT_AMPERE: LazyLock<EchonetliteFrame> = LazyLock::new(|| {
 async fn commit_to_database<'a>(
     pool: &PgPool,
     unit: &SM::UnitForCumlativeAmountsPower,
-    recorded_at: DateTime<Utc>,
+    recorded_at: &DateTime<Utc>,
     frame: &EchonetliteFrame<'a>,
 ) -> result::Result<(), DaqDaemonError> {
-    match frame.esv {
-        // Get_res プロパティ値読み出し応答
-        0x72 => {
-            for v in frame.edata.iter() {
-                match SM::Properties::try_from(v) {
-                    // 0xe2 積算電力量計測値履歴1 (正方向計測値)
-                    Ok(SM::Properties::HistoricalCumlativeAmount(hist)) => {
-                        commit_historical_cumlative_amount(&pool, unit, &hist).await?;
-                    }
-                    // 0xe7 瞬時電力計測値
-                    Ok(SM::Properties::InstantiousPower(epower)) => {
-                        commit_instant_epower(&pool, &recorded_at, &epower).await?;
-                    }
-                    // 0xe8 瞬時電流計測値
-                    Ok(SM::Properties::InstantiousCurrent(current)) => {
-                        commit_instant_current(&pool, &recorded_at, &current).await?;
-                    }
-                    // 0xea 定時積算電力量計測値(正方向計測値)
-                    Ok(SM::Properties::CumlativeAmountsOfPowerAtFixedTime(epower)) => {
-                        commit_cumlative_amount_epower(&pool, unit, &epower).await?;
-                    }
-                    //
-                    _ => {}
-                }
+    for edata in frame.edata.iter() {
+        match SM::Properties::try_from(edata) {
+            // 0xe2 積算電力量計測値履歴1 (正方向計測値)
+            Ok(SM::Properties::HistoricalCumlativeAmount(hist)) => {
+                commit_historical_cumlative_amount(&pool, unit, &hist).await?;
             }
-        }
-        // INF プロパティ値通知
-        0x73 => {
-            for v in frame.edata.iter() {
-                match SM::Properties::try_from(v) {
-                    // 0xea 定時積算電力量計測値(正方向計測値)
-                    Ok(SM::Properties::CumlativeAmountsOfPowerAtFixedTime(epower)) => {
-                        commit_cumlative_amount_epower(&pool, unit, &epower)
-                            .await
-                            .ok();
-                    }
-                    //
-                    _ => {}
-                }
+            // 0xe7 瞬時電力計測値
+            Ok(SM::Properties::InstantiousPower(epower)) => {
+                commit_instant_epower(&pool, recorded_at, &epower).await?;
             }
+            // 0xe8 瞬時電流計測値
+            Ok(SM::Properties::InstantiousCurrent(current)) => {
+                commit_instant_current(&pool, recorded_at, &current).await?;
+            }
+            // 0xea 定時積算電力量計測値(正方向計測値)
+            Ok(SM::Properties::CumlativeAmountsOfPowerAtFixedTime(epower)) => {
+                commit_cumlative_amount_epower(&pool, unit, &epower).await?;
+            }
+            //
+            Ok(v) => tracing::warn!(r#"This data "{v}" is not committed to the database"#),
+            Err(e) => tracing::error!("{e}"),
         }
-        //
-        _esv => {}
     }
     Ok(())
 }
@@ -197,32 +176,55 @@ async fn rx_erxudp(
                 0,
             )
             .single()
-            .expect("time calculate error");
+            .ok_or(DaqDaemonError::Other("time calculate error"))?;
         modified.with_timezone(&Utc)
     };
-    // ERXUDPメッセージからEchonetliteフレームを取り出す。
-    let config = bincode::config::standard()
-        .with_big_endian()
-        .with_fixed_int_encoding();
 
-    let decoded: Result<(EchonetliteFrame, usize), _> =
-        bincode::borrow_decode_from_slice(&erxudp.data, config);
+    let dump = |xs: &Vec<u8>| xs.iter().map(|b| format!("{:02X}", b)).collect::<String>();
 
-    match decoded {
-        Ok((frame, _len)) => {
-            // 受信値をデーターベースに蓄積する
-            commit_to_database(pool, unit, recorded_at, &frame).await?;
-            // 受信値をログに出す
-            let mut s = Vec::<String>::new();
-            s.push(frame.show());
-            for v in frame.edata.iter() {
-                s.push(v.show(Some(unit)));
+    match erxudp.destination_port {
+        // UDPポート番号 0E1A = 3610 は Echonetliteメッセージ
+        0x0e1a => {
+            // ERXUDPメッセージからEchonetliteフレームを取り出す。
+            let config = bincode::config::standard()
+                .with_big_endian()
+                .with_fixed_int_encoding();
+
+            let decoded: Result<(EchonetliteFrame, usize), _> =
+                bincode::borrow_decode_from_slice(&erxudp.data, config);
+
+            match decoded {
+                Ok((frame, _len)) => {
+                    // 受信値をデーターベースに蓄積する
+                    commit_to_database(pool, unit, &recorded_at, &frame).await?;
+                    // 受信値をログに出す
+                    let mut s = Vec::<String>::new();
+                    s.push(frame.show());
+                    for v in frame.edata.iter() {
+                        s.push(v.show(Some(unit)));
+                    }
+                    tracing::info!("{}", s.join(" "));
+                }
+                Err(e) => {
+                    tracing::error!(
+                        r#"Echonetlite message "{}" parse error, reason:{}"#,
+                        dump(&erxudp.data),
+                        e
+                    );
+                }
             }
-            tracing::info!("{}", s.join(" "));
         }
-        Err(e) => {
-            let str_msg = erxudp.data.escape_ascii().to_string();
-            tracing::trace!(r#"Arrival udp payload "{str_msg}" is IGNORED, reason:{e}"#);
+        // UDPポート番号 02CC = 716 は PANAメッセージ(RFC5191)
+        0x02cc => {
+            tracing::warn!(r#"PANA message "{}" is IGNORED"#, dump(&erxudp.data));
+            return Ok(());
+        }
+        // 未知のUDPポート番号
+        rport => {
+            tracing::warn!(
+                r#"rport {rport} message "{}" is UNKNOWN and IGNORED."#,
+                dump(&erxudp.data)
+            );
         }
     }
     Ok(())
@@ -298,7 +300,7 @@ async fn commit_cumlative_amount_epower(
             epower.time_point.second(),
         )
         .single()
-        .expect("time calculate error");
+        .ok_or(DaqDaemonError::Other("time calculate error"))?;
     let kwh = Decimal::from(epower.cumlative_amounts_power) * unit.0;
     let rec = sqlx::query!(
         r#"INSERT INTO cumlative_amount_epower ( recorded_at, kwh ) VALUES ( $1, $2 ) RETURNING id"#,
@@ -317,23 +319,29 @@ async fn commit_historical_cumlative_amount(
     unit: &SM::UnitForCumlativeAmountsPower,
     hist: &SM::HistoricalCumlativeAmount,
 ) -> result::Result<(), DaqDaemonError> {
+    // 現在時刻
     let jst_now = Utc::now().with_timezone(&Asia::Tokyo);
-    let jst_today = Asia::Tokyo
+
+    // 現在時刻 - hist.n_days_ago 日の午前０時ちょうど
+    let day = Asia::Tokyo
         .with_ymd_and_hms(jst_now.year(), jst_now.month(), jst_now.day(), 0, 0, 0)
         .single()
-        .expect("time calculate error");
-    let day = jst_today
-        .checked_sub_days(Days::new(hist.n_days_ago as u64))
-        .expect("time calculate error");
-    let halfhour = TimeDelta::new(30 * 60, 0).expect("time calculate error");
-    //
+        .and_then(|jst_today| jst_today.checked_sub_days(Days::new(hist.n_days_ago as u64)))
+        .ok_or(DaqDaemonError::Other("time calculate error"))?;
+
+    // 30分間隔のTimeDelta
+    let halfhour =
+        TimeDelta::new(30 * 60, 0).ok_or(DaqDaemonError::Other("time calculate error"))?;
+
+    // 本日の午前０時ちょうどから30分毎の時刻列を作成するイテレータ
     let mut accumulator = Some(day);
     let timeserial = std::iter::from_fn(move || {
         let ret = accumulator;
         accumulator = accumulator.and_then(|v| v.checked_add_signed(halfhour));
         ret
     });
-    //
+
+    // 時間と積算電力量の組を作成する
     let histrical_kwh = hist
         .historical
         .iter()
@@ -349,7 +357,7 @@ async fn commit_historical_cumlative_amount(
         })
         .flatten()
         .collect::<Vec<(DateTime<Utc>, Decimal)>>();
-    //
+
     let mut query_builder =
         QueryBuilder::new(r#"INSERT INTO cumlative_amount_epower (recorded_at, kwh)"#);
 

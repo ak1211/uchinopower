@@ -23,14 +23,14 @@ pub struct Epandesc {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Erxudp {
-    pub sender: Ipv6Addr,
-    pub destination: Ipv6Addr,
-    pub rport: u16,
-    pub lport: u16,
-    pub senderlla: u64,
-    pub secured: u8,
-    pub datalen: u16,
-    pub data: Vec<u8>,
+    pub sender: Ipv6Addr,      // 送信元IPv6アドレス
+    pub destination: Ipv6Addr, // 送信先IPv6アドレス
+    pub sender_port: u16,      // 送信元UDPポート番号
+    pub destination_port: u16, // 送信先UDPポート番号
+    pub senderlla: u64,        // 送信元のMAC層アドレス
+    pub secured: u8,           // 1:暗号化あり, 0:暗号化なし
+    pub datalen: u16,          // 受信データ長
+    pub data: Vec<u8>,         // 受信データ
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

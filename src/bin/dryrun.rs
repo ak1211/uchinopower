@@ -173,7 +173,7 @@ fn exec_pairing(cli: &Cli, args: &PairingArgs) -> anyhow::Result<()> {
     let mut reader = port
         .try_clone()
         .and_then(|cloned| Ok(BufReader::new(cloned)))
-        .expect("Failed to clone");
+        .context("Failed to clone")?;
 
     // 接続するスマートメーターをアクティブスキャンで探して設定ファイルに情報を保存する
     match pairing(&mut reader, &mut port, args.activescan, &credentials)? {
@@ -332,7 +332,8 @@ fn main() -> anyhow::Result<()> {
         .with_thread_ids(true)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(subscriber)
+        .context("setting default subscriber failed")?;
 
     let cli = Cli::parse();
 

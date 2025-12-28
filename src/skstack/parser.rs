@@ -83,10 +83,10 @@ fn rx_erxudp(s: &str) -> nom::IResult<&str, SkRxD> {
     let (s, destination_address) = ipv6addr.parse(s)?;
     let (s, _) = space1.parse(s)?;
     // 送信元ポート番号
-    let (s, rport) = map(u16_hex_digit, |n| n).parse(s)?;
+    let (s, sender_port) = map(u16_hex_digit, |n| n).parse(s)?;
     let (s, _) = space1.parse(s)?;
     // 送信先ポート番号
-    let (s, lport) = map(u16_hex_digit, |n| n).parse(s)?;
+    let (s, destination_port) = map(u16_hex_digit, |n| n).parse(s)?;
     let (s, _) = space1.parse(s)?;
     // 送信元のMAC層アドレス
     let (s, senderlla) = u64_hex_digit.parse(s)?;
@@ -106,8 +106,8 @@ fn rx_erxudp(s: &str) -> nom::IResult<&str, SkRxD> {
     let erxudp = skstack::Erxudp {
         sender: sender_address,
         destination: destination_address,
-        rport: rport,
-        lport: lport,
+        sender_port,
+        destination_port: destination_port,
         senderlla: senderlla,
         secured: secured,
         datalen,
@@ -250,8 +250,8 @@ fn test3() {
             SkRxD::Erxudp(skstack::Erxudp {
                 sender: sender,
                 destination: destination,
-                rport: 0x02CC,
-                lport: 0x02CC,
+                sender_port: 0x02CC,
+                destination_port: 0x02CC,
                 senderlla: senderlla,
                 secured: 1,
                 datalen: datalen,
