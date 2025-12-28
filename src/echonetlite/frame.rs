@@ -67,12 +67,19 @@ impl<'de, Context> bincode::BorrowDecode<'de, Context> for EchonetliteFrame<'de>
     ) -> core::result::Result<Self, bincode::error::DecodeError> {
         let ehd: u16 = bincode::BorrowDecode::borrow_decode(decoder)?;
         if ehd == 0x1081 {
+            // offset[0:2] EHD(2byte) = 0x10, 0x81
+            // offset[2:4] トランザクションID(2byte)
             let tid: u16 = bincode::BorrowDecode::borrow_decode(decoder)?;
+            // offset[4:7] 送信元EOJ(3byte)
             let seoj: [u8; 3] = bincode::BorrowDecode::borrow_decode(decoder)?;
+            // offset[7:10] 送信先EOJ(3byte)
             let deoj: [u8; 3] = bincode::BorrowDecode::borrow_decode(decoder)?;
+            // offset[10:11] Echonetliteサービス(1byte)
             let esv: u8 = bincode::BorrowDecode::borrow_decode(decoder)?;
+            // offset[11:12] EDATAプロパティ数(1byte)
             let opc: u8 = bincode::BorrowDecode::borrow_decode(decoder)?;
-            let mut edata: Vec<EchonetliteEdata> = Vec::new();
+            // offset[12:12+opc] EDATA(opc bytes)
+            let mut edata: Vec<EchonetliteEdata> = Vec::with_capacity(opc as usize);
             for _idx in 0..opc {
                 edata.push(bincode::BorrowDecode::borrow_decode(decoder)?);
             }

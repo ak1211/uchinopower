@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MPL-2.0
 // SPDX-FileCopyrightText: 2025 Akihiro Yamamoto <github.com/ak1211>
 //
-use crate::echonetlite::EchonetliteEdata;
+use crate::echonetlite::{EchonetliteEdata, superclass};
 use chrono::{NaiveDate, NaiveDateTime};
 use rust_decimal::Decimal;
 use serde::de::{self, Visitor};
@@ -11,6 +11,7 @@ use std::fmt;
 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Properties {
+    Superclass(superclass::Properties),
     Coefficient(Coefficient),
     NumberOfEffectiveDigits(NumberOfEffectiveDigits),
     CumlativeAmountsPower(CumlativeAmountsPower),
@@ -22,16 +23,17 @@ pub enum Properties {
 }
 
 impl<'a> Properties {
-    pub fn show(&self, opt_unit: Option<&UnitForCumlativeAmountsPower>) -> String {
+    pub fn show(&self, appendix_unit: Option<&UnitForCumlativeAmountsPower>) -> String {
         match self {
+            Self::Superclass(a) => format!("{}", a),
             Self::Coefficient(a) => format!("{}", a),
             Self::NumberOfEffectiveDigits(a) => format!("{}", a),
-            Self::CumlativeAmountsPower(a) => a.show(opt_unit),
+            Self::CumlativeAmountsPower(a) => a.show(appendix_unit),
             Self::UnitForCumlativeAmountsPower(a) => format!("{}", a),
-            Self::HistoricalCumlativeAmount(a) => a.show(opt_unit),
+            Self::HistoricalCumlativeAmount(a) => a.show(appendix_unit),
             Self::InstantiousPower(a) => format!("{}", a),
             Self::InstantiousCurrent(a) => format!("{}", a),
-            Self::CumlativeAmountsOfPowerAtFixedTime(a) => a.show(opt_unit),
+            Self::CumlativeAmountsOfPowerAtFixedTime(a) => a.show(appendix_unit),
         }
     }
 }
@@ -40,7 +42,9 @@ impl<'a> TryFrom<&'a EchonetliteEdata<'_>> for Properties {
     type Error = String;
 
     fn try_from(edata: &EchonetliteEdata) -> Result<Self, Self::Error> {
-        if let Ok(a) = Coefficient::try_from(edata) {
+        if let Ok(a) = superclass::Properties::try_from(edata) {
+            Ok(Properties::Superclass(a))
+        } else if let Ok(a) = Coefficient::try_from(edata) {
             Ok(Properties::Coefficient(a))
         } else if let Ok(a) = NumberOfEffectiveDigits::try_from(edata) {
             Ok(Properties::NumberOfEffectiveDigits(a))
@@ -134,8 +138,8 @@ impl CumlativeAmountsPower {
         return Decimal::from(self.0) * unit.0;
     }
 
-    pub fn show(&self, opt_unit: Option<&UnitForCumlativeAmountsPower>) -> String {
-        match opt_unit {
+    pub fn show(&self, appendix_unit: Option<&UnitForCumlativeAmountsPower>) -> String {
+        match appendix_unit {
             Some(unit) => format!("積算電力量計測値(正方向計測値)={:8} kwh", self.kwh(unit)),
             None => format!("積算電力量計測値(正方向計測値)={:8}", self.0),
         }
@@ -248,8 +252,8 @@ pub struct HistoricalCumlativeAmount {
 impl HistoricalCumlativeAmount {
     pub const EPC: u8 = 0xe2; // 0xe2 積算電力量計測値履歴1 (正方向計測値)
 
-    pub fn show(&self, opt_unit: Option<&UnitForCumlativeAmountsPower>) -> String {
-        match opt_unit {
+    pub fn show(&self, appendix_unit: Option<&UnitForCumlativeAmountsPower>) -> String {
+        match appendix_unit {
             Some(unit) => format!(
                 "積算電力量計測値履歴1 (正方向計測値)={:2}日前[{}]",
                 self.n_days_ago,
@@ -389,8 +393,8 @@ pub struct CumlativeAmountsOfPowerAtFixedTime {
 impl CumlativeAmountsOfPowerAtFixedTime {
     pub const EPC: u8 = 0xea; // 0xea 定時積算電力量計測値(正方向計測値)
 
-    pub fn show(&self, opt_unit: Option<&UnitForCumlativeAmountsPower>) -> String {
-        match opt_unit {
+    pub fn show(&self, appendix_unit: Option<&UnitForCumlativeAmountsPower>) -> String {
+        match appendix_unit {
             Some(unit) => format!(
                 "定時積算電力量計測値(正方向計測値)={} ({:8} kwh)",
                 self.time_point.format("%Y-%m-%d %H:%M:%S").to_string(),

@@ -61,7 +61,8 @@ async fn main() -> anyhow::Result<()> {
         .with_thread_ids(true)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(subscriber)
+        .context("setting default subscriber failed")?;
 
     // コマンドライン引数
     let cli = Cli::parse();
