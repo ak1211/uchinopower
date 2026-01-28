@@ -588,7 +588,7 @@ where
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     // プログラムの情報
     let git_head_ref = built_info::GIT_HEAD_REF.unwrap_or_default();
